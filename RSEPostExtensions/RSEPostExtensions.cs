@@ -1,23 +1,12 @@
 ﻿using FrooxEngine;
-
 using HarmonyLib;
-
 using ResoniteModLoader;
-
 using RSE = ResoniteScreenshotExtensions.ResoniteScreenshotExtensions;
 using Metadata = ResoniteScreenshotExtensions.Metadata;
-
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Collections.Concurrent;
-
 using Elements.Core;
-
-using Renderite.Shared;
-
-
-
-
 
 
 #if DEBUG
@@ -43,6 +32,8 @@ public class RSEPostExtensions : ResoniteMod {
 	[AutoRegisterConfigKey]
 	public static readonly ModConfigurationKey<string> DiscordURLs = new("Discord URLs", "Comma-seperated list of Discord webhook urls.\n\nYou can nickname them with a 'query parameter', e.g.\n'https://discord.com/api/webhooks/1234/key<color=hero.yellow>?<LABEL GOES HERE></color>'", () => "");
 
+	[AutoRegisterConfigKey]
+	public static readonly ModConfigurationKey<bool> DoubleClickConfirm = new("Double click to confirm", "Double click to confirm upload?", () => false);
 
 	static readonly Uri POST_TO_URI = new Uri("resdb:///b5dc11709108e26d9e9788401111a15000813a262e2c7ebee2109c4321a92ad1");
 	const string MENU_ITEM_TAG = "RSE_POST_TO_DISCORD";
@@ -109,36 +100,53 @@ public class RSEPostExtensions : ResoniteMod {
 		if (item == null) {
 			item = menu.AddItem("Post to...", POST_TO_URI, null);
 			item.Slot.Tag = MENU_ITEM_TAG;
+
+			item.Button.LocalPressed += async (button, eventData) =>
+			{
+				// render like a submenu
+				_ = button.World.Coroutines.StartTask(async delegate {
+					var newMenu = await hookedInstance.LocalUser.OpenContextMenu(menu.CurrentSummoner, menu.Pointer.Target, options: new ContextMenuOptions { speedOverride = 12 });
+					string? PEUrls = Config!.GetValue(DiscordURLs) is string s && !string.IsNullOrWhiteSpace(s) ? s : null;
+					ModConfiguration? RSEConfig = ModLoader.Mods().FirstOrDefault(m => m.Name == "ResoniteScreenshotExtensions")?.GetConfiguration();
+					ModConfigurationKey? RSEDiscordUrlKey = RSEConfig?.ConfigurationItemDefinitions.FirstOrDefault(m => m.Name == "DiscordWebhookUrl");
+					string discordWebhookUrlStringList = PEUrls ??
+						(RSEDiscordUrlKey != null && RSEConfig!.TryGetValue(RSEDiscordUrlKey, out object? RSEFallbackUrl)
+						? RSEFallbackUrl as string
+						: null) ?? "";
+					string[] discordWebhookUrls = discordWebhookUrlStringList.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+					int webhookCount = 0;
+					foreach (string url in discordWebhookUrls) {
+						webhookCount++;
+						string[] urlParts = url.Split('?');
+						string baseUrl = urlParts[0];
+						string webhookName = urlParts.Length > 1 ? urlParts[1] : $"#{webhookCount}<alpha=#77><size=75%> aka </alpha></size>{Util.GetMemorableName(baseUrl)}";
+
+						ContextMenuItem menuItem = newMenu.AddItem(webhookName, RSE.PhotoMetadata_Patch.DISCORD_ICON_URI, null);
+						bool isConfirming = false;
+						menuItem.Button.LocalPressed += (button, eventData) => {
+							if (Config!.GetValue(DoubleClickConfirm) && !isConfirming) {
+								isConfirming = true;
+								menuItem.Label.Target.Value = $"<color=hero.red>Really post to </color><b>{webhookName}</b>?";
+
+								menuItem.RunInSeconds(3f, () => {
+									if (isConfirming) {
+										isConfirming = false;
+										if (menuItem != null && !menuItem.IsRemoved) {
+											menuItem.Label.Target.Value = webhookName;
+										}
+									}
+								});
+								return;
+							}
+
+							PostToDiscord(hookedInstance, new Uri(baseUrl));
+						};
+					}
+				});
+			};
 		}
 
-		item.Button.LocalPressed += async (button, eventData) =>
-		{
-			// render like a submenu
-			_ = button.World.Coroutines.StartTask(async delegate {
-				var newMenu = await hookedInstance.LocalUser.OpenContextMenu(menu.CurrentSummoner, menu.Pointer.Target, options: new ContextMenuOptions { speedOverride = 12 });
-				string? PEUrls = Config!.GetValue(DiscordURLs) is string s && !string.IsNullOrWhiteSpace(s) ? s : null;
-				ModConfiguration? RSEConfig = ModLoader.Mods().FirstOrDefault(m => m.Name == "ResoniteScreenshotExtensions")?.GetConfiguration();
-				ModConfigurationKey? RSEDiscordUrlKey = RSEConfig?.ConfigurationItemDefinitions.FirstOrDefault(m => m.Name == "DiscordWebhookUrl");
-				string discordWebhookUrlStringList = PEUrls ??
-					(RSEDiscordUrlKey != null && RSEConfig!.TryGetValue(RSEDiscordUrlKey, out object? RSEFallbackUrl)
-					? RSEFallbackUrl as string
-					: null) ?? "";
-				string[] discordWebhookUrls = discordWebhookUrlStringList.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-
-				int webhookCount = 0;
-				foreach (string url in discordWebhookUrls) {
-					webhookCount++;
-					string[] urlParts = url.Split('?');
-					string baseUrl = urlParts[0];
-					string webhookName = urlParts.Length > 1 ? urlParts[1] : $"#{webhookCount}<alpha=#77><size=75%> aka </closeall>{Util.GetMemorableName(baseUrl)}";
-
-					ContextMenuItem menuItem = newMenu.AddItem(webhookName, RSE.PhotoMetadata_Patch.DISCORD_ICON_URI, null);
-					menuItem.Button.LocalPressed += (button, eventData) => {
-						PostToDiscord(hookedInstance, new Uri(baseUrl));
-					};
-				}
-			});
-		};
 		return false;
 	}
 
@@ -191,7 +199,7 @@ public class RSEPostExtensions : ResoniteMod {
 			return configInstance.GetValue(key);
 		}
 
-		[HarmonyPostfix]
+		[HarmonyFinalizer]
 		public static void Postfix(string filePath) {
 			_urlMappings.TryRemove(filePath, out _);
 			Msg("Completed!");
