@@ -1,14 +1,17 @@
 # RSEPostExtensions
 
-A [ResoniteModLoader](https://github.com/resonite-modding-group/ResoniteModLoader) mod for [Resonite](https://resonite.com/) that exposes some stuff during app exit, and delays it.
-<!-- Edit to describe what your mod does and what it may solve -->
-<!-- If your mod solves an issue, you should link to any relevant issues on the resonite github -->
+A [ResoniteModLoader](https://github.com/resonite-modding-group/ResoniteModLoader) mod for [Resonite](https://resonite.com/) that adds more posting options to [ResoniteScreenshotExtensions](https://github.com/hantabaru1014/ResoniteScreenshotExtensions).
 
+Currently allows you to add multiple Discord webhooks.
 
-## Screenshots
-<!-- If your mod has visible effects in the game, attach some images or video of it in-use here! Otherwise remove this section -->
+Planned:
+ - Fediverse
+   - *key family (Misskey, Sharkey, Iceshrimp-js)
+   - Mastodon?
+ - Fluxer
 
 ## Installation
 1. Install [ResoniteModLoader](https://github.com/resonite-modding-group/ResoniteModLoader).
-1. Place [ExampleModName.dll](https://github.com/YourGithubUsername/YourModRepoName/releases/latest/download/ExampleModName.dll) into your `rml_mods` folder. This folder should be at `C:\Program Files (x86)\Steam\steamapps\common\Resonite\rml_mods` for a default install. You can create it if it's missing, or if you launch the game once with ResoniteModLoader installed it will create this folder for you.
-1. Start the game. If you want to verify that the mod is working you can check your Resonite logs.
+2. Place [RSEPostExtensions.dll](https://github.com/noblereign/ResoniteRSEPostExtensions/releases/latest/download/RSEPostExtensions.dll) into your `rml_mods` folder. This folder should be at `C:\Program Files (x86)\Steam\steamapps\common\Resonite\rml_mods` for a default install. You can create it if it's missing, or if you launch the game once with ResoniteModLoader installed it will create this folder for you.
+3. Make sure [ResoniteScreenshotExtensions](https://github.com/hantabaru1014/ResoniteScreenshotExtensions) is installed.
+4. Start the game. If you want to verify that the mod is working you can check your Resonite logs.
