@@ -41,7 +41,7 @@ public class RSEPostExtensions : ResoniteMod {
 	public static readonly ModConfigurationKey<bool> Enabled = new("Enabled", "Enables the mod.", () => true);
 
 	[AutoRegisterConfigKey]
-	public static readonly ModConfigurationKey<string> DiscordURLs = new("Discord URLs", "Comma-seperated list of Discord webhook urls. Add a query parameter to label them in the menu, like so: 'https://discord.com/api/webhooks/1234/key?<LABEL GOES HERE>'", () => "");
+	public static readonly ModConfigurationKey<string> DiscordURLs = new("Discord URLs", "Comma-seperated list of Discord webhook urls.\n\nYou can nickname them with a 'query parameter', e.g.\n'https://discord.com/api/webhooks/1234/key<color=hero.yellow>?<LABEL GOES HERE></color>'", () => "");
 
 
 	static readonly Uri POST_TO_URI = new Uri("resdb:///b5dc11709108e26d9e9788401111a15000813a262e2c7ebee2109c4321a92ad1");
