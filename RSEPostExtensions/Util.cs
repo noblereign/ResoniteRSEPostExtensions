@@ -36,7 +36,7 @@ internal class Util {
 		string color = Colors[rand.Next(Colors.Length)];
 		string animal = Critters[rand.Next(Critters.Length)];
 
-		return $"{adjective}{color}{animal}";
+		return $"{adjective} {color} {animal}";
 	}
 
 	private static int GetDeterministicHashCode(string str) {

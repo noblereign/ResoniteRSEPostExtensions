@@ -1,12 +1,20 @@
 ﻿using FrooxEngine;
+
 using HarmonyLib;
+
 using ResoniteModLoader;
+
 using RSE = ResoniteScreenshotExtensions.ResoniteScreenshotExtensions;
 using Metadata = ResoniteScreenshotExtensions.Metadata;
+
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Collections.Concurrent;
+
 using Elements.Core;
+
+using Renderite.Shared;
+
 
 
 
@@ -56,6 +64,8 @@ public class RSEPostExtensions : ResoniteMod {
 
 	static void Setup() {
 		PatchRSE();
+		Harmony harmony = new Harmony(harmonyId);
+		harmony.PatchAll();
 	}
 
 #if DEBUG
@@ -91,8 +101,8 @@ public class RSEPostExtensions : ResoniteMod {
 		}
 	}
 
-	static bool ContextMenuHook(PhotoMetadata __instance, ContextMenu menu) {
-		if (!__instance.Enabled) return false;
+	static bool ContextMenuHook([HarmonyArgument(0)] PhotoMetadata hookedInstance, ContextMenu menu) {
+		if (!hookedInstance.Enabled) return false;
 		if (!Config!.GetValue(Enabled)) return true;
 
 		var item = menu.Slot.GetComponentInChildren<ContextMenuItem>((i) => i.Slot.Tag == MENU_ITEM_TAG);
@@ -104,24 +114,30 @@ public class RSEPostExtensions : ResoniteMod {
 		item.Button.LocalPressed += async (button, eventData) =>
 		{
 			// render like a submenu
-			await new ToWorld();
-			var newMenu = await __instance.LocalUser.OpenContextMenu(menu.CurrentSummoner, menu.Pointer.Target, options: new ContextMenuOptions { speedOverride = 12 });
-			string discordWebhookUrlStringList = Config!.GetValue(DiscordURLs) ?? ModLoader.Mods().FirstOrDefault(m => m.Name == "ResoniteScreenshotExtensions")?.GetConfiguration()?.GetValue(RSE.DiscordWebhookUrlKey) ?? "";
-			string[] discordWebhookUrls = discordWebhookUrlStringList.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+			_ = button.World.Coroutines.StartTask(async delegate {
+				var newMenu = await hookedInstance.LocalUser.OpenContextMenu(menu.CurrentSummoner, menu.Pointer.Target, options: new ContextMenuOptions { speedOverride = 12 });
+				string? PEUrls = Config!.GetValue(DiscordURLs) is string s && !string.IsNullOrWhiteSpace(s) ? s : null;
+				ModConfiguration? RSEConfig = ModLoader.Mods().FirstOrDefault(m => m.Name == "ResoniteScreenshotExtensions")?.GetConfiguration();
+				ModConfigurationKey? RSEDiscordUrlKey = RSEConfig?.ConfigurationItemDefinitions.FirstOrDefault(m => m.Name == "DiscordWebhookUrl");
+				string discordWebhookUrlStringList = PEUrls ??
+					(RSEDiscordUrlKey != null && RSEConfig!.TryGetValue(RSEDiscordUrlKey, out object? RSEFallbackUrl)
+					? RSEFallbackUrl as string
+					: null) ?? "";
+				string[] discordWebhookUrls = discordWebhookUrlStringList.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-			int webhookCount = 0;
-			foreach (string url in discordWebhookUrls) {
-				webhookCount++;
-				string[] urlParts = url.Split('?');
-				string baseUrl = urlParts[0];
-				string webhookName = urlParts.Length > 1 ? urlParts[1] : $"#{webhookCount} aka {Util.GetMemorableName(baseUrl)}";
-				// could technically automatically name it from discord, but i don't wanna deal with possible ratelimiting...
+				int webhookCount = 0;
+				foreach (string url in discordWebhookUrls) {
+					webhookCount++;
+					string[] urlParts = url.Split('?');
+					string baseUrl = urlParts[0];
+					string webhookName = urlParts.Length > 1 ? urlParts[1] : $"#{webhookCount}<alpha=#77><size=75%> aka </closeall>{Util.GetMemorableName(baseUrl)}";
 
-				ContextMenuItem menuItem = newMenu.AddItem(webhookName, RSE.PhotoMetadata_Patch.DISCORD_ICON_URI, null);
-				menuItem.Button.LocalPressed += (button, eventData) => {
-					PostToDiscord(__instance, new Uri(baseUrl));
-				};
-			}
+					ContextMenuItem menuItem = newMenu.AddItem(webhookName, RSE.PhotoMetadata_Patch.DISCORD_ICON_URI, null);
+					menuItem.Button.LocalPressed += (button, eventData) => {
+						PostToDiscord(hookedInstance, new Uri(baseUrl));
+					};
+				}
+			});
 		};
 		return false;
 	}
@@ -147,14 +163,14 @@ public class RSEPostExtensions : ResoniteMod {
 	[HarmonyPatch(typeof(RSE.PhotoMetadata_Patch), "PostToDiscord")]
 	public static class OverrideDiscordUrlPatch {
 		static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions) {
-			MethodInfo targetGetValue = AccessTools.Method(typeof(ModConfiguration), nameof(ModConfiguration.GetValue))
-												   .MakeGenericMethod(typeof(string));
-
 			MethodInfo myMiddleman = AccessTools.Method(typeof(OverrideDiscordUrlPatch), nameof(CustomConfigInterceptor));
 
 			foreach (var instruction in instructions) {
-				if (instruction.Calls(targetGetValue)) {
-					// add filepath to the stack then intercept
+				if ((instruction.opcode == OpCodes.Call || instruction.opcode == OpCodes.Callvirt) &&
+					instruction.operand is MethodInfo mi &&
+					mi.Name == nameof(ModConfiguration.GetValue) &&
+					mi.ReturnType == typeof(string)) {
+					// Inject file path and hijack the call
 					yield return new CodeInstruction(OpCodes.Ldarg_1);
 					yield return new CodeInstruction(OpCodes.Call, myMiddleman);
 				} else {
@@ -165,7 +181,7 @@ public class RSEPostExtensions : ResoniteMod {
 
 		public static string? CustomConfigInterceptor(ModConfiguration configInstance, ModConfigurationKey<string> key, string filePath) {
 			if (Config!.GetValue(Enabled) && key == RSE.DiscordWebhookUrlKey) {
-				if (_urlMappings.TryRemove(filePath, out Uri? webhookUri)) {
+				if (_urlMappings.TryGetValue(filePath, out Uri? webhookUri)) {
 					return webhookUri.ToString();
 				}
 				Warn("Couldn't find webhook URI mapping!! ABORT!!!");
@@ -173,6 +189,12 @@ public class RSEPostExtensions : ResoniteMod {
 				return "";
 			}
 			return configInstance.GetValue(key);
+		}
+
+		[HarmonyPostfix]
+		public static void Postfix(string filePath) {
+			_urlMappings.TryRemove(filePath, out _);
+			Msg("Completed!");
 		}
 	}
 }
