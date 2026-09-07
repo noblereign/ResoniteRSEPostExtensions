@@ -16,7 +16,7 @@ using ResoniteHotReloadLib;
 namespace RSEPostExtensions;
 
 public class RSEPostExtensions : ResoniteMod {
-	internal const string VERSION_CONSTANT = "2.0.0"; //Changing the version here updates it in all locations needed
+	internal const string VERSION_CONSTANT = "2.0.1"; //Changing the version here updates it in all locations needed
 	public override string Name => "RSEPostExtensions";
 	public override string Author => "Noble";
 	public override string Version => VERSION_CONSTANT;
@@ -425,7 +425,6 @@ public class RSEPostExtensions : ResoniteMod {
 		} catch (Exception ex) {
 			Msg($"Misskey upload failed: {ex.Message}");
 
-			await new ToWorld();
 			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to Misskey!", colorX.Red, 0.7f, 5f);
 
 			return (null, null);
