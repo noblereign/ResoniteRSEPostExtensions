@@ -19,7 +19,7 @@ using ResoniteHotReloadLib;
 namespace RSEPostExtensions;
 
 public class RSEPostExtensions : ResoniteMod {
-	internal const string VERSION_CONSTANT = "3.0.0"; //Changing the version here updates it in all locations needed
+	internal const string VERSION_CONSTANT = "3.0.1"; //Changing the version here updates it in all locations needed
 	public override string Name => "RSEPostExtensions";
 	public override string Author => "Noble";
 	public override string Version => VERSION_CONSTANT;
@@ -294,7 +294,7 @@ public class RSEPostExtensions : ResoniteMod {
 				});
 			};
 
-			if (!Config!.GetValue(FetchMetadataFromWeb)) return;
+			if (!Config!.GetValue(FetchMetadataFromWeb)) continue;
 
 			_ = UpdateManifestUIAsync();
 			_ = UpdateDriveUsageUIAsync();
