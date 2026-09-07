@@ -4,13 +4,13 @@ A [ResoniteModLoader](https://github.com/resonite-modding-group/ResoniteModLoade
 
 Currently allows you to: 
 - Add multiple Discord webhooks
-- Upload and share to Misskey-based fediverse software
+- Upload and share to Misskey-based fediverse software (e.g. Sharkey, Iceshrimp-js, and of course Misskey itself)
+- Upload directly to [GalleVR](https://gallevr.app)
 
 Planned:
  - Fediverse
    - Mastodon?
  - Fluxer
- - GalleVR
 
 ## Installation
 1. Install [ResoniteModLoader](https://github.com/resonite-modding-group/ResoniteModLoader).

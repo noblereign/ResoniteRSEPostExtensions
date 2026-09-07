@@ -20,6 +20,7 @@
 	<ItemGroup>
     <PackageReference Include="BepInEx.AssemblyPublicizer.MSBuild" Version="0.4.3"></PackageReference>
     <PackageReference Include="Newtonsoft.Json" Version="13.0.5-beta1" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
 		<Reference Include="ResoniteModLoader">
 			<HintPath>$(ResonitePath)Libraries\ResoniteModLoader.dll</HintPath>
 			<Private>False</Private>

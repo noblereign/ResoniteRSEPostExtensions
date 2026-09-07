@@ -93,7 +93,13 @@ internal class Util {
 		return "application/octet-stream";
 	}
 
-	public static async Task<string> GetUsernameFromUserId(string userId) {
+	public static async Task<string> GetUsernameFromUserId(string userId, World? world) {
+		if (world != null) {
+			User ingameUser = world.GetUserByUserId(userId);
+			if (ingameUser != null) {
+				return ingameUser.UserName;
+			}
+		}
 		var user = await Engine.Current.Cloud.Users.GetUser(userId);
 		if (user.IsOK)
 			return user.Entity.Username;

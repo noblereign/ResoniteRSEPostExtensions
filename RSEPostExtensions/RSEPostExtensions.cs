@@ -1,13 +1,16 @@
-﻿using FrooxEngine;
-using HarmonyLib;
-using ResoniteModLoader;
-using RSE = ResoniteScreenshotExtensions.ResoniteScreenshotExtensions;
-using Metadata = ResoniteScreenshotExtensions.Metadata;
+﻿using System.Collections.Concurrent;
 using System.Reflection;
 using System.Reflection.Emit;
-using System.Collections.Concurrent;
-using Elements.Core;
 using System.Web;
+using Elements.Core;
+using FrooxEngine;
+using HarmonyLib;
+using ResoniteModLoader;
+using SkyFrost.Base;
+
+using Metadata = ResoniteScreenshotExtensions.Metadata;
+using RSE = ResoniteScreenshotExtensions.ResoniteScreenshotExtensions;
+
 
 #if DEBUG
 using ResoniteHotReloadLib;
@@ -16,7 +19,7 @@ using ResoniteHotReloadLib;
 namespace RSEPostExtensions;
 
 public class RSEPostExtensions : ResoniteMod {
-	internal const string VERSION_CONSTANT = "2.0.1"; //Changing the version here updates it in all locations needed
+	internal const string VERSION_CONSTANT = "3.0.0"; //Changing the version here updates it in all locations needed
 	public override string Name => "RSEPostExtensions";
 	public override string Author => "Noble";
 	public override string Version => VERSION_CONSTANT;
@@ -45,7 +48,10 @@ public class RSEPostExtensions : ResoniteMod {
 	public static readonly ModConfigurationKey<string> MisskeyFolderName = new("Misskey Folder Name", "What should the photos folder in the Misskey Drive be called?", () => "Resonite");
 
 	[AutoRegisterConfigKey]
-	public static readonly ModConfigurationKey<string> MisskeyPostBody = new("Misskey Post Body", "What should be filled in when sharing from Misskey?\n\nAvailable tokens:\n<Location>\n<Host>\n<Photographer>\n<Time>\n<AppVersion>\n<RendererName>\n<CameraManufacturer>\n<CameraModel>\n<CameraFOV>", () => "#Resonite");
+	public static readonly ModConfigurationKey<string> MisskeyPostBody = new("Misskey Post Body", "What should be written by default when sharing from Misskey?\n\nAvailable tokens:\n<Location>\n<Host>\n<Photographer>\n<Time>\n<AppVersion>\n<RendererName>\n<CameraManufacturer>\n<CameraModel>\n<CameraFOV>", () => "#Resonite");
+
+	[AutoRegisterConfigKey]
+	public static readonly ModConfigurationKey<string> GalleVRToken = new("GalleVR Token", "GalleVR login token.\n\nThis can be obtained (scuffedly) by opening the Developer Tools in your browser, going to the Network tab, and looking for a request header containing 'Authorization: Bearer'. You'll only paste in the random characters that come after Bearer.", () => "");
 
 	[AutoRegisterConfigKey]
 	public static readonly ModConfigurationKey<bool> Multiposting = new("Multiposting", "Keep the context menu open after choosing an option?", () => true);
@@ -53,6 +59,7 @@ public class RSEPostExtensions : ResoniteMod {
 
 	static readonly Uri POST_TO_URI = new Uri("resdb:///b5dc11709108e26d9e9788401111a15000813a262e2c7ebee2109c4321a92ad1");
 	static readonly Uri FEDIVERSE_URI = new Uri("resdb:///87b9aee416b10948cab768e3ada9f5537d453f78971d6537ab4ad818e90a5daf.webp");
+	static readonly Uri GALLEVR_URI = new Uri("resdb:///33070a028930ac3e520443134d5afd04bfcc57dc7a2b17e612147c52ca0f73c7.png");
 	static readonly Uri ERROR_URI = new Uri("resdb:///92a0b1cf9536b1e675e3e1c4db52133c5dc0596d128d7bb91582ce75bfb6a9da");
 
 	const string MENU_ITEM_TAG = "RSE_POST_TO_DISCORD";
@@ -179,7 +186,7 @@ public class RSEPostExtensions : ResoniteMod {
 
 		string Fallback(string? val) => string.IsNullOrWhiteSpace(val) ? "Unknown" : val;
 
-		string hostName = await Util.GetUsernameFromUserId(photo.LocationHost._userId.Value);
+		string hostName = await Util.GetUsernameFromUserId(photo.LocationHost._userId.Value, photo.World);
 
 		return template
 			.Replace("<Location>", Fallback(RSE.PhotoMetadata_Patch.SanitizeText(photo.LocationName)))
@@ -276,6 +283,7 @@ public class RSEPostExtensions : ResoniteMod {
 					menuItem.RunSynchronously(() => {
 						Hyperlink linkComponent = menuItem.Slot.AttachComponent<Hyperlink>();
 						linkComponent.URL.Value = BuildMkShareUri(baseUrl, "/share", uploadResult.postBody ?? "", uploadResult.fileId);
+						linkComponent.Reason.Value = $"Share this photo on {currentInstanceName}";
 						currentState = ButtonState.Success;
 					});
 				} else {
@@ -342,7 +350,7 @@ public class RSEPostExtensions : ResoniteMod {
 
 		Slot? extendedTagSlot = photo.Slot.FindChild("PhotoMetadata_Tags");
 
-		string photographerName = await Util.GetUsernameFromUserId(photo.TakenBy._userId);
+		string photographerName = await Util.GetUsernameFromUserId(photo.TakenBy._userId, photo.World);
 		string altText = $"A Resonite photo taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(photo.LocationName)}.";
 		string postBodyText = await FormatMisskeyPostBody(Config!.GetValue(MisskeyPostBody) ?? "", photo, photographerName);
 
@@ -356,7 +364,7 @@ public class RSEPostExtensions : ResoniteMod {
 					extendedTagSpace.TryReadValue<bool>($"PhotoMetadata/{userInfo.User._userId}/isInView", out bool isInView);
 
 					if (isInView) {
-						string username = await Util.GetUsernameFromUserId(userInfo.User._userId);
+						string username = await Util.GetUsernameFromUserId(userInfo.User._userId, photo.World);
 
 						if (userInfo.User._userId == photo.TakenBy._userId) {
 							isSelfie = true;
@@ -445,6 +453,165 @@ public class RSEPostExtensions : ResoniteMod {
 		return folder?.Id;
 	}
 
+	static void GenerateGalleVRButton(ContextMenu menu, PhotoMetadata metadata) {
+		string? gvrToken = Config!.GetValue(GalleVRToken) is string s && !string.IsNullOrWhiteSpace(s) ? s : null;
+		if (gvrToken == null) {
+			return;
+		}
+
+		colorX currentColor = colorX.FromHexCode("4E1D89");
+		ContextMenuItem menuItem = menu.AddItem("GalleVR", GALLEVR_URI, currentColor);
+
+		if (!CheckGalleValidity(metadata)) {
+			menuItem.Button.Enabled = false;
+			return;
+		}
+
+		ButtonState currentState = ButtonState.Idle;
+		
+
+		void UpdateButtonVisuals() {
+			if (menuItem == null || menuItem.IsRemoved) return;
+			menuItem.Button.Enabled = currentState != ButtonState.Uploading;
+
+			switch (currentState) {
+				case ButtonState.Idle:
+					menuItem.Label.Target.Value = "GalleVR";
+					menuItem.Color.Value = currentColor;
+					break;
+				case ButtonState.Confirming:
+					menuItem.Label.Target.Value = $"<color=hero.red>Really upload to </color><b>GalleVR?</b>";
+					menuItem.Color.Value = currentColor;
+					break;
+				case ButtonState.Uploading:
+					menuItem.Label.Target.Value = "Uploading...";
+					menuItem.Color.Value = currentColor;
+					break;
+				case ButtonState.Success:
+					menuItem.Label.Target.Value = $"Uploaded!\n<size=60%><color=#bcbcbc>Click to open your gallery</color></size>";
+					menuItem.Color.Value = RadiantUI_Constants.Hero.GREEN;
+					break;
+				case ButtonState.Error:
+					menuItem.Label.Target.Value = $"<color=hero.red>Upload Failed</color>\n<size=60%><color=#bcbcbc>Click to try again</color></size>";
+					menuItem.Color.Value = RadiantUI_Constants.Hero.RED;
+					break;
+			}
+		}
+
+		menuItem.Button.LocalPressed += async (button, eventData) => {
+			if (currentState == ButtonState.Uploading || !menuItem.Button.Enabled) return;
+
+			if (currentState == ButtonState.Success) {
+				return;
+			}
+
+			if (Config!.GetValue(DoubleClickConfirm) && currentState == ButtonState.Idle) {
+				currentState = ButtonState.Confirming;
+				UpdateButtonVisuals();
+
+				menuItem.RunInSeconds(3f, () => {
+					if (currentState == ButtonState.Confirming) {
+						currentState = ButtonState.Idle;
+						UpdateButtonVisuals();
+					}
+				});
+				return;
+			}
+
+			currentState = ButtonState.Uploading;
+			UpdateButtonVisuals();
+
+			string? uploadResult = await PostToGalleVRAsync(metadata, gvrToken);
+
+			if (menuItem == null || menuItem.IsRemoved) return;
+
+			if (uploadResult != null) {
+				menuItem.RunSynchronously(() => {
+					Hyperlink linkComponent = menuItem.Slot.AttachComponent<Hyperlink>();
+					linkComponent.URL.Value = new Uri("https://gallevr.app/gallery");
+					linkComponent.Reason.Value = "Manage your GalleVR photos";
+					currentState = ButtonState.Success;
+				});
+			} else {
+				currentState = ButtonState.Error;
+			}
+			menuItem.RunSynchronously(() => {
+				UpdateButtonVisuals();
+			});
+		};
+	}
+	static bool CheckGalleValidity(PhotoMetadata photo) {
+		if (photo == null) return false;
+		if (string.IsNullOrWhiteSpace(photo.CameraManufacturer.Value)) return false;
+		if (photo.TakenBy._userId.Value != Engine.Current.Cloud.CurrentUserID) return false;
+
+		return true;
+	}
+
+	static async Task<string?> PostToGalleVRAsync(PhotoMetadata photo, string token) {
+		if (!Config!.GetValue(Multiposting)) {
+			photo.LocalUser.CloseContextMenu(null!);
+		}
+		Msg("Posting to GalleVR...");
+
+		var tex = photo.Slot.GetComponent<StaticTexture2D>();
+		var url = tex?.URL.Value;
+		if (url is null) return null;
+
+		List<GalleVRClient.Player> galleVRPlayers = new();
+		foreach (AssetMetadata.UserInfo userInfo in photo.UserInfos) {
+			galleVRPlayers.Add(new GalleVRClient.Player {
+				Id = userInfo.User._userId,
+				Name = await Util.GetUsernameFromUserId(userInfo.User._userId, photo.World)
+			});
+		}
+
+		await new ToBackground();
+
+		try {
+			
+			var gatherTask = photo.Engine.AssetManager.GatherAssetFile(url, 100f).AsTask();
+			await Task.WhenAll((Task)gatherTask);
+
+			string? tmpPath = await gatherTask;
+
+			if (tmpPath is null) {
+				return null;
+			}
+
+			GalleVRClient.GalleVRPhotoMetadata formattedMetadata = new() {
+				TakenById = photo.TakenBy._userId.Value,
+				TakenDate = new DateTimeOffset(photo.TimeTaken.Value).ToUnixTimeMilliseconds(),
+				Filename = (photo.TimeTaken.Value.Kind == DateTimeKind.Utc ? photo.TimeTaken.Value.ToLocalTime() : photo.TimeTaken.Value).ToString("yyyy-MM-dd HH.mm.ss") + ".webp",
+				LocalPath = tmpPath,
+				CameraManufacturer = photo.CameraManufacturer.Value,
+				Application = "Resonite",
+				IsNonVrcx = false,
+				CameraFov = photo.CameraFOV.Value,
+				TakenGlobalPosition = GalleVRClient.SpatialData.FromFloat3(photo.TakenGlobalPosition.Value),
+				TakenGlobalRotation = GalleVRClient.SpatialData.FromFloatQ(photo.TakenGlobalRotation.Value),
+				TakenGlobalScale = GalleVRClient.SpatialData.FromFloat3(photo.TakenGlobalScale.Value),
+				World = new GalleVRClient.WorldMetadata() {
+					Id = photo.LocationURL.Value.OriginalString,
+					Name = photo.LocationName.Value
+				},
+				Players = galleVRPlayers
+			};
+
+			string? photoUrl = await GalleVRClient.UploadFileAsync(photo.TakenBy._userId, token, tmpPath, formattedMetadata, photo);
+			// GalleVR returns the photo link (yay!) but going to it just redirects to an empty profile (bruh)
+			Msg($"Upload finished!");
+			return photoUrl;
+
+		} catch (Exception ex) {
+			Msg($"Misskey upload failed: {ex.Message}");
+
+			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to GalleVR!", colorX.Red, 0.7f, 5f);
+
+			return null;
+		}
+	}
+
 	static bool ContextMenuHook([HarmonyArgument(0)] PhotoMetadata hookedInstance, ContextMenu menu) {
 		if (!hookedInstance.Enabled) return false;
 		if (!Config!.GetValue(Enabled)) return true;
@@ -458,9 +625,10 @@ public class RSEPostExtensions : ResoniteMod {
 			{
 				// render like a submenu
 				_ = button.World.Coroutines.StartTask(async delegate {
-					ContextMenu newMenu = await hookedInstance.LocalUser.OpenContextMenu(menu.CurrentSummoner, menu.Pointer.Target, options: new ContextMenuOptions { speedOverride = 12 });
+					ContextMenu newMenu = await hookedInstance.LocalUser.OpenContextMenu(menu.CurrentSummoner, menu.Pointer.Target, options: new ContextMenuOptions { speedOverride = 10 });
 					GenerateDiscordButtons(newMenu, hookedInstance);
 					GenerateMisskeyButtons(newMenu, hookedInstance);
+					GenerateGalleVRButton(newMenu, hookedInstance);
 				});
 			};
 		}
