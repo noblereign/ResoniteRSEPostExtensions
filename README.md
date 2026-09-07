@@ -11,6 +11,7 @@ Planned:
  - Fediverse
    - Mastodon?
  - Fluxer
+ - Bluesky?
 
 ## Installation
 1. Install [ResoniteModLoader](https://github.com/resonite-modding-group/ResoniteModLoader).
