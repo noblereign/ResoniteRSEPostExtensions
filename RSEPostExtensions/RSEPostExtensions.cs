@@ -1,23 +1,13 @@
 ﻿using FrooxEngine;
-
 using HarmonyLib;
-
 using ResoniteModLoader;
-
 using RSE = ResoniteScreenshotExtensions.ResoniteScreenshotExtensions;
 using Metadata = ResoniteScreenshotExtensions.Metadata;
-
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Collections.Concurrent;
-
 using Elements.Core;
-
-using System.Threading.Tasks;
-
-using static Elements.Core.FileUtil;
-
-
+using System.Web;
 
 #if DEBUG
 using ResoniteHotReloadLib;
@@ -26,7 +16,7 @@ using ResoniteHotReloadLib;
 namespace RSEPostExtensions;
 
 public class RSEPostExtensions : ResoniteMod {
-	internal const string VERSION_CONSTANT = "1.1.0"; //Changing the version here updates it in all locations needed
+	internal const string VERSION_CONSTANT = "2.0.0"; //Changing the version here updates it in all locations needed
 	public override string Name => "RSEPostExtensions";
 	public override string Author => "Noble";
 	public override string Version => VERSION_CONSTANT;
@@ -54,6 +44,12 @@ public class RSEPostExtensions : ResoniteMod {
 	[AutoRegisterConfigKey]
 	public static readonly ModConfigurationKey<string> MisskeyFolderName = new("Misskey Folder Name", "What should the photos folder in the Misskey Drive be called?", () => "Resonite");
 
+	[AutoRegisterConfigKey]
+	public static readonly ModConfigurationKey<string> MisskeyPostBody = new("Misskey Post Body", "What should be filled in when sharing from Misskey?\n\nAvailable tokens:\n<Location>\n<Host>\n<Photographer>\n<Time>\n<AppVersion>\n<RendererName>\n<CameraManufacturer>\n<CameraModel>\n<CameraFOV>", () => "#Resonite");
+
+	[AutoRegisterConfigKey]
+	public static readonly ModConfigurationKey<bool> Multiposting = new("Multiposting", "Keep the context menu open after choosing an option?", () => true);
+
 
 	static readonly Uri POST_TO_URI = new Uri("resdb:///b5dc11709108e26d9e9788401111a15000813a262e2c7ebee2109c4321a92ad1");
 	static readonly Uri FEDIVERSE_URI = new Uri("resdb:///87b9aee416b10948cab768e3ada9f5537d453f78971d6537ab4ad818e90a5daf.webp");
@@ -62,6 +58,7 @@ public class RSEPostExtensions : ResoniteMod {
 	const string MENU_ITEM_TAG = "RSE_POST_TO_DISCORD";
 	private static readonly ConcurrentDictionary<string, Uri> _urlMappings = new();
 	private static readonly ConcurrentDictionary<string, string> _misskeyFolderCache = new();
+	enum ButtonState { Idle, Confirming, Uploading, Success, Error }
 
 	public override void OnEngineInit() {
 #if DEBUG
@@ -134,8 +131,12 @@ public class RSEPostExtensions : ResoniteMod {
 			string webhookName = urlParts.Length > 1 ? urlParts[1] : $"#{webhookCount}<alpha=#77><size=75%> aka </alpha></size>{Util.GetMemorableName(baseUrl)}";
 
 			ContextMenuItem menuItem = menu.AddItem(webhookName, RSE.PhotoMetadata_Patch.DISCORD_ICON_URI, null);
+
 			bool isConfirming = false;
+
 			menuItem.Button.LocalPressed += (button, eventData) => {
+				if (!menuItem.Button.Enabled) return;
+
 				if (Config!.GetValue(DoubleClickConfirm) && !isConfirming) {
 					isConfirming = true;
 					menuItem.Label.Target.Value = $"<color=hero.red>Really post to </color><b>{webhookName}</b>?";
@@ -143,17 +144,53 @@ public class RSEPostExtensions : ResoniteMod {
 					menuItem.RunInSeconds(3f, () => {
 						if (isConfirming) {
 							isConfirming = false;
-							if (menuItem != null && !menuItem.IsRemoved) {
+							if (menuItem != null && !menuItem.IsRemoved && menuItem.Button.Enabled) {
 								menuItem.Label.Target.Value = webhookName;
 							}
 						}
 					});
 					return;
 				}
+				menuItem.Button.Enabled = false;
+				menuItem.Label.Target.Value = $"<i>Sent to {webhookName}";
+				
 
 				PostToDiscord(metadata, new Uri(baseUrl));
 			};
 		}
+	}
+
+	public static Uri BuildMkShareUri(string baseUrl, string relativePath, string text, string fileId) {
+		Uri baseUri = new Uri(baseUrl.TrimEnd('/') + "/");
+		Uri fullEndpoint = new Uri(baseUri, relativePath.TrimStart('/'));
+		UriBuilder builder = new UriBuilder(fullEndpoint);
+		var query = HttpUtility.ParseQueryString(builder.Query);
+		query["text"] = text;
+		query["fileIds"] = fileId;
+		builder.Query = query.ToString();
+
+		return builder.Uri;
+	}
+
+	static async Task<string> FormatMisskeyPostBody(string template, PhotoMetadata photo, string photographerName) {
+		if (string.IsNullOrWhiteSpace(template)) return "";
+
+		var time = photo.TimeTaken.Value.Kind == DateTimeKind.Utc ? photo.TimeTaken.Value.ToLocalTime() : photo.TimeTaken.Value;
+
+		string Fallback(string? val) => string.IsNullOrWhiteSpace(val) ? "Unknown" : val;
+
+		string hostName = await Util.GetUsernameFromUserId(photo.LocationHost._userId.Value);
+
+		return template
+			.Replace("<Location>", Fallback(RSE.PhotoMetadata_Patch.SanitizeText(photo.LocationName)))
+			.Replace("<Host>", Fallback(hostName))
+			.Replace("<Photographer>", Fallback(photographerName))
+			.Replace("<Time>", time.ToString("yyyy-MM-dd HH:mm"))
+			.Replace("<AppVersion>", Fallback(photo.AppVersion.Value))
+			.Replace("<RendererName>", Fallback(photo.RendererName.Value))
+			.Replace("<CameraManufacturer>", Fallback(photo.CameraManufacturer.Value))
+			.Replace("<CameraModel>", Fallback(photo.CameraModel.Value))
+			.Replace("<CameraFOV>", photo.CameraFOV.Value.ToString("0.##"));
 	}
 
 	static void GenerateMisskeyButtons(ContextMenu menu, PhotoMetadata metadata) {
@@ -174,30 +211,79 @@ public class RSEPostExtensions : ResoniteMod {
 
 			string currentInstanceName = baseUrl;
 			string currentDriveStats = "<alpha=#50>...</alpha>";
-			bool isConfirming = false;
 
 			ContextMenuItem menuItem = menu.AddItem(currentInstanceName, FEDIVERSE_URI, null);
+			ButtonState currentState = ButtonState.Idle;
+			colorX currentColor = menuItem.Color.Value;
+			menuItem.Color.ActiveLink.ReleaseLink();
 
-			void UpdateButtonText() {
-				if (menuItem != null && !menuItem.IsRemoved) {
-					menuItem.Label.Target.Value = (isConfirming ? "<color=hero.red>Really post to </color><b>" : "") + currentInstanceName + (isConfirming ? "?</b>" : "") + $"\n<size=60%><color=#bcbcbc>{currentDriveStats}</color></size>";
+			void UpdateButtonVisuals() {
+				if (menuItem == null || menuItem.IsRemoved) return;
+				menuItem.Button.Enabled = currentState != ButtonState.Uploading;
+
+				switch (currentState) {
+					case ButtonState.Idle:
+						menuItem.Label.Target.Value = currentInstanceName + $"\n<size=60%><color=#bcbcbc>{currentDriveStats}</color></size>";
+						menuItem.Color.Value = currentColor;
+						break;
+					case ButtonState.Confirming:
+						menuItem.Label.Target.Value = $"<color=hero.red>Really upload to </color><b>{currentInstanceName}?</b>\n<size=60%><color=#bcbcbc>{currentDriveStats}</color></size>";
+						menuItem.Color.Value = currentColor;
+						break;
+					case ButtonState.Uploading:
+						menuItem.Label.Target.Value = "Uploading...";
+						menuItem.Color.Value = currentColor;
+						break;
+					case ButtonState.Success:
+						menuItem.Label.Target.Value = $"Uploaded!\n<size=60%><color=#bcbcbc>Click to share on {currentInstanceName}</color></size>";
+						menuItem.Color.Value = RadiantUI_Constants.Hero.GREEN;
+						break;
+					case ButtonState.Error:
+						menuItem.Label.Target.Value = $"<color=hero.red>Upload Failed</color>\n<size=60%><color=#bcbcbc>Click to try again</color></size>";
+						menuItem.Color.Value = RadiantUI_Constants.Hero.RED;
+						break;
 				}
 			}
 
-			menuItem.Button.LocalPressed += (button, eventData) => {
-				if (Config!.GetValue(DoubleClickConfirm) && !isConfirming) {
-					isConfirming = true;
-					UpdateButtonText();
+			menuItem.Button.LocalPressed += async (button, eventData) => {
+				if (currentState == ButtonState.Uploading || !menuItem.Button.Enabled) return;
+
+				if (currentState == ButtonState.Success) {
+					return;
+				}
+
+				if (Config!.GetValue(DoubleClickConfirm) && currentState == ButtonState.Idle) {
+					currentState = ButtonState.Confirming;
+					UpdateButtonVisuals();
+
 					menuItem.RunInSeconds(3f, () => {
-						if (isConfirming) {
-							isConfirming = false;
-							UpdateButtonText();
+						if (currentState == ButtonState.Confirming) {
+							currentState = ButtonState.Idle;
+							UpdateButtonVisuals();
 						}
 					});
 					return;
 				}
 
-				PostToMisskey(metadata, new Uri(baseUrl), token);
+				currentState = ButtonState.Uploading;
+				UpdateButtonVisuals();
+
+				(string? fileId, string? postBody) uploadResult = await PostToMisskeyAsync(metadata, new Uri(baseUrl), token);
+
+				if (menuItem == null || menuItem.IsRemoved) return;
+
+				if (uploadResult.fileId != null) {
+					menuItem.RunSynchronously(() => {
+						Hyperlink linkComponent = menuItem.Slot.AttachComponent<Hyperlink>();
+						linkComponent.URL.Value = BuildMkShareUri(baseUrl, "/share", uploadResult.postBody ?? "", uploadResult.fileId);
+						currentState = ButtonState.Success;
+					});
+				} else {
+					currentState = ButtonState.Error;
+				}
+				menuItem.RunSynchronously(() => {
+					UpdateButtonVisuals();
+				});
 			};
 
 			if (!Config!.GetValue(FetchMetadataFromWeb)) return;
@@ -214,19 +300,17 @@ public class RSEPostExtensions : ResoniteMod {
 						if (menuItem.IsRemoved) return;
 
 						string newName = manifest.Name ?? baseUrl;
-
 						currentInstanceName = currentInstanceName.Replace(baseUrl, newName);
-						UpdateButtonText();
-
+						
 						if (manifest.ThemeColor != null) {
-							menuItem.Color.ActiveLink.ReleaseLink();
-							menuItem.Color.Value = colorX.FromHexCode(manifest.ThemeColor);
+							currentColor = colorX.FromHexCode(manifest.ThemeColor);
 						}
 
 						var iconSrc = manifest.Icons?.GetFirst()?.Src;
 						if (iconSrc != null && Uri.TryCreate(new Uri(baseUrl), iconSrc, out Uri? absoluteUri)) {
 							menuItem.SpriteURL = absoluteUri;
 						}
+						UpdateButtonVisuals();
 					});
 				} catch {}
 			}
@@ -239,109 +323,113 @@ public class RSEPostExtensions : ResoniteMod {
 					menuItem.RunSynchronously(() => {
 						if (menuItem.IsRemoved) return;
 						currentDriveStats = driveUsage;
-						UpdateButtonText();
+						UpdateButtonVisuals();
 					});
 				} catch {}
 			}
 		}
 	}
 
-	static void PostToMisskey(PhotoMetadata photo, Uri instanceUrl, string accessToken) {
-		photo.LocalUser.CloseContextMenu(null!);
+	static async Task<(string? fileId, string? postBody)> PostToMisskeyAsync(PhotoMetadata photo, Uri instanceUrl, string accessToken) {
+		if (!Config!.GetValue(Multiposting)) {
+			photo.LocalUser.CloseContextMenu(null!);
+		}
 		Msg("Posting to Misskey...");
 
-		photo.StartGlobalTask(async () => {
-			var tex = photo.Slot.GetComponent<StaticTexture2D>();
-			var url = tex?.URL.Value;
-			if (url is null) return;
+		var tex = photo.Slot.GetComponent<StaticTexture2D>();
+		var url = tex?.URL.Value;
+		if (url is null) return (null, null);
 
-			Slot? extendedTagSlot = photo.Slot.FindChild("PhotoMetadata_Tags"); // https://github.com/BlueberryWolf/FixPhotoMetadata
+		Slot? extendedTagSlot = photo.Slot.FindChild("PhotoMetadata_Tags");
 
-			string photographerName = await Util.GetUsernameFromUserId(photo.TakenBy._userId);
+		string photographerName = await Util.GetUsernameFromUserId(photo.TakenBy._userId);
+		string altText = $"A Resonite photo taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(photo.LocationName)}.";
+		string postBodyText = await FormatMisskeyPostBody(Config!.GetValue(MisskeyPostBody) ?? "", photo, photographerName);
 
-			string altText = $"A Resonite photo taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(photo.LocationName)}.";
-			if (extendedTagSlot != null) {
-				DynamicVariableSpace extendedTagSpace = extendedTagSlot.FindSpace("Avatar");
-				if (extendedTagSpace != null) {
-					List<(string username, float screenX)> usersData = new List<(string, float)>();
-					bool isSelfie = false;
+		if (extendedTagSlot != null) {
+			DynamicVariableSpace extendedTagSpace = extendedTagSlot.FindSpace("Avatar");
+			if (extendedTagSpace != null) {
+				List<(string username, float screenX)> usersData = new List<(string, float)>();
+				bool isSelfie = false;
 
-					foreach (AssetMetadata.UserInfo userInfo in photo.UserInfos) {
-						extendedTagSpace.TryReadValue<bool>($"PhotoMetadata/{userInfo.User._userId}/isInView", out bool isInView);
+				foreach (AssetMetadata.UserInfo userInfo in photo.UserInfos) {
+					extendedTagSpace.TryReadValue<bool>($"PhotoMetadata/{userInfo.User._userId}/isInView", out bool isInView);
 
-						if (isInView) {
-							string username = await Util.GetUsernameFromUserId(userInfo.User._userId);
+					if (isInView) {
+						string username = await Util.GetUsernameFromUserId(userInfo.User._userId);
 
-							if (userInfo.User._userId == photo.TakenBy._userId) {
-								isSelfie = true;
-							}
-
-							float3 userPos = userInfo.HeadPosition;
-							float3 toUser = userPos - photo.TakenGlobalPosition.Value;
-
-							floatQ inverseCamRot = photo.TakenGlobalRotation.Value.Inverted;
-							float3 localPos = inverseCamRot * toUser;
-
-							float screenX = localPos.x / localPos.z;
-
-							usersData.Add((username, screenX));
+						if (userInfo.User._userId == photo.TakenBy._userId) {
+							isSelfie = true;
 						}
+
+						float3 userPos = userInfo.HeadPosition;
+						float3 toUser = userPos - photo.TakenGlobalPosition.Value;
+
+						floatQ inverseCamRot = photo.TakenGlobalRotation.Value.Inverted;
+						float3 localPos = inverseCamRot * toUser;
+
+						float screenX = localPos.x / localPos.z;
+
+						usersData.Add((username, screenX));
 					}
-
-					// sort by left to right
-					string[] visibleUsers = usersData
-						.OrderBy(u => u.screenX)
-						.Select(u => u.username)
-						.ToArray();
-
-					string baseText = $"A {(isSelfie ? "selfie" : "photo")} taken by {photographerName} on Resonite. Captured in {RSE.PhotoMetadata_Patch.SanitizeText(photo.LocationName)}";
-					string formattedUsers = ".";
-
-					if (visibleUsers.Length == 1) {
-						if (!isSelfie) {
-							formattedUsers = $", featuring {visibleUsers[0]}.";
-						}
-					} else if (visibleUsers.Length == 2) {
-						formattedUsers = $", with {visibleUsers[0]} and {visibleUsers[1]} together in the {(isSelfie ? "shot" : "photo")}.";
-					} else if (visibleUsers.Length >= 3) {
-						formattedUsers = $". {visibleUsers.Length} users are visible.\n Listed from left to right, they are: {string.Join(", ", visibleUsers.Take(visibleUsers.Length - 1))}, and {visibleUsers.Last()}.";
-					}
-
-					altText = $"{baseText}{formattedUsers}";
-				}
-			}
-
-
-			await new ToBackground();
-
-			try {
-				string folderName = Config?.GetValue(MisskeyFolderName) ?? "Resonite";
-				string fileName = (photo.TimeTaken.Value.Kind == DateTimeKind.Utc ? photo.TimeTaken.Value.ToLocalTime() : photo.TimeTaken.Value).ToString("yyyy-MM-dd HH.mm.ss");
-
-				var gatherTask = photo.Engine.AssetManager.GatherAssetFile(url, 100f).AsTask();
-				var folderTask = GetCachedFolderIdAsync(instanceUrl, accessToken, folderName);
-
-				// Wait for both the disk operation and the network API to finish
-				await Task.WhenAll((Task)gatherTask, folderTask);
-
-				string? tmpPath = await gatherTask;
-				string? folderId = await folderTask;
-
-				if (tmpPath is null) {
-					return;
 				}
 
-				fileName = $"{fileName}{Path.GetExtension(tmpPath)}";
+				// sort by left to right
+				string[] visibleUsers = usersData
+					.OrderBy(u => u.screenX)
+					.Select(u => u.username)
+					.ToArray();
 
-				var file = await MisskeyDriveClient.UploadFileAsync(instanceUrl, accessToken, tmpPath, folderId, fileName, altText);
+				string baseText = $"A {(isSelfie ? "selfie" : "photo")} taken by {photographerName} on Resonite. Captured in {RSE.PhotoMetadata_Patch.SanitizeText(photo.LocationName)}";
+				string formattedUsers = ".";
 
-				Msg($"Upload finished!");
-			} catch (Exception ex) {
-				Msg($"Misskey upload failed: {ex.Message}");
-				await new ToWorld();
-				NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to Misskey!", colorX.Red, 0.7f, 5f);
+				if (visibleUsers.Length == 1) {
+					if (!isSelfie) {
+						formattedUsers = $", featuring {visibleUsers[0]}.";
+					}
+				} else if (visibleUsers.Length == 2) {
+					formattedUsers = $", with {visibleUsers[0]} and {visibleUsers[1]} together in the {(isSelfie ? "shot" : "photo")}.";
+				} else if (visibleUsers.Length >= 3) {
+					formattedUsers = $". {visibleUsers.Length} users are visible.\n Listed from left to right, they are: {string.Join(", ", visibleUsers.Take(visibleUsers.Length - 1))}, and {visibleUsers.Last()}.";
+				}
+
+				altText = $"{baseText}{formattedUsers}";
 			}
-		});
+		}
+
+		await new ToBackground();
+
+		try {
+			string folderName = Config?.GetValue(MisskeyFolderName) ?? "Resonite";
+			string fileName = (photo.TimeTaken.Value.Kind == DateTimeKind.Utc ? photo.TimeTaken.Value.ToLocalTime() : photo.TimeTaken.Value).ToString("yyyy-MM-dd HH.mm.ss");
+
+			var gatherTask = photo.Engine.AssetManager.GatherAssetFile(url, 100f).AsTask();
+			var folderTask = GetCachedFolderIdAsync(instanceUrl, accessToken, folderName);
+
+			await Task.WhenAll((Task)gatherTask, folderTask);
+
+			string? tmpPath = await gatherTask;
+			string? folderId = await folderTask;
+
+			if (tmpPath is null) {
+				return (null, null);
+			}
+
+			fileName = $"{fileName}{Path.GetExtension(tmpPath)}";
+
+			MisskeyDriveClient.DriveFile? file = await MisskeyDriveClient.UploadFileAsync(instanceUrl, accessToken, tmpPath, folderId, fileName, altText);
+
+			Msg($"Upload finished!");
+			return (file?.Id, postBodyText);
+
+		} catch (Exception ex) {
+			Msg($"Misskey upload failed: {ex.Message}");
+
+			await new ToWorld();
+			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to Misskey!", colorX.Red, 0.7f, 5f);
+
+			return (null, null);
+		}
 	}
 
 	private static async Task<string?> GetCachedFolderIdAsync(Uri instanceUrl, string token, string folderName) {
@@ -367,7 +455,7 @@ public class RSEPostExtensions : ResoniteMod {
 			item = menu.AddItem("Post to...", POST_TO_URI, null);
 			item.Slot.Tag = MENU_ITEM_TAG;
 
-			item.Button.LocalPressed += async (button, eventData) =>
+			item.Button.LocalPressed += (button, eventData) =>
 			{
 				// render like a submenu
 				_ = button.World.Coroutines.StartTask(async delegate {
@@ -382,7 +470,9 @@ public class RSEPostExtensions : ResoniteMod {
 	}
 
 	static void PostToDiscord(PhotoMetadata photo, Uri webhookUri) {
-		photo.LocalUser.CloseContextMenu(null!);
+		if (!Config!.GetValue(Multiposting)) {
+			photo.LocalUser.CloseContextMenu(null!);
+		}
 		Msg("Posting to Discord...");
 
 		photo.StartGlobalTask(async () =>
