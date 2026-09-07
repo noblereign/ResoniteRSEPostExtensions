@@ -2,11 +2,12 @@
 
 A [ResoniteModLoader](https://github.com/resonite-modding-group/ResoniteModLoader) mod for [Resonite](https://resonite.com/) that adds more posting options to [ResoniteScreenshotExtensions](https://github.com/hantabaru1014/ResoniteScreenshotExtensions).
 
-Currently allows you to add multiple Discord webhooks.
+Currently allows you to: 
+- Add multiple Discord webhooks
+- Upload and share to Misskey-based fediverse software
 
 Planned:
  - Fediverse
-   - *key family (Misskey, Sharkey, Iceshrimp-js)
    - Mastodon?
  - Fluxer
  - GalleVR
