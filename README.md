@@ -9,6 +9,7 @@ Planned:
    - *key family (Misskey, Sharkey, Iceshrimp-js)
    - Mastodon?
  - Fluxer
+ - GalleVR
 
 ## Installation
 1. Install [ResoniteModLoader](https://github.com/resonite-modding-group/ResoniteModLoader).

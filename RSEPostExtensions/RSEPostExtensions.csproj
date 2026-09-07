@@ -43,6 +43,9 @@
     <Reference Include="SkyFrost.Base">
       <HintPath>$(ResonitePath)SkyFrost.Base.dll</HintPath>
     </Reference>
+    <Reference Include="SkyFrost.Base.Models">
+      <HintPath>$(ResonitePath)SkyFrost.Base.Models.dll</HintPath>
+    </Reference>
     <Reference Include="FrooxEngine" Publicize="true">
       <HintPath>$(ResonitePath)FrooxEngine.dll</HintPath>
       <Private>False</Private>
