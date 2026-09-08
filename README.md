@@ -16,5 +16,6 @@ Planned:
 ## Installation
 1. Install [ResoniteModLoader](https://github.com/resonite-modding-group/ResoniteModLoader).
 2. Place [RSEPostExtensions.dll](https://github.com/noblereign/ResoniteRSEPostExtensions/releases/latest/download/RSEPostExtensions.dll) into your `rml_mods` folder. This folder should be at `C:\Program Files (x86)\Steam\steamapps\common\Resonite\rml_mods` for a default install. You can create it if it's missing, or if you launch the game once with ResoniteModLoader installed it will create this folder for you.
-3. Make sure [ResoniteScreenshotExtensions](https://github.com/hantabaru1014/ResoniteScreenshotExtensions) is installed.
-4. Start the game. If you want to verify that the mod is working you can check your Resonite logs.
+3. Place [SixLabors.ImageSharp.dll](https://github.com/noblereign/ResoniteRSEPostExtensions/releases/latest/download/SixLabors.ImageSharp.dll) into your `rml_libs` folder. This folder should be at `C:\Program Files (x86)\Steam\steamapps\common\Resonite\rml_libs` for a default install. You can create it if it's missing, or if you launch the game once with ResoniteModLoader installed it will create this folder for you.
+4. Make sure [ResoniteScreenshotExtensions](https://github.com/hantabaru1014/ResoniteScreenshotExtensions) is installed.
+5. Start the game. If you want to verify that the mod is working you can check your Resonite logs.
