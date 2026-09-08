@@ -19,7 +19,7 @@ using ResoniteHotReloadLib;
 namespace RSEPostExtensions;
 
 public class RSEPostExtensions : ResoniteMod {
-	internal const string VERSION_CONSTANT = "3.0.2"; //Changing the version here updates it in all locations needed
+	internal const string VERSION_CONSTANT = "3.1.0"; //Changing the version here updates it in all locations needed
 	public override string Name => "RSEPostExtensions";
 	public override string Author => "Noble";
 	public override string Version => VERSION_CONSTANT;
@@ -360,21 +360,67 @@ public class RSEPostExtensions : ResoniteMod {
 				List<(string username, float screenX)> usersData = new List<(string, float)>();
 				bool isSelfie = false;
 
+				Msg("Processing extended tags...");
 				foreach (AssetMetadata.UserInfo userInfo in photo.UserInfos) {
-					extendedTagSpace.TryReadValue<bool>($"PhotoMetadata/{userInfo.User._userId}/isInView", out bool isInView);
+					string uid = userInfo.User._userId.Value;
+					bool isInView = true; // we would rather tag people if FixPhotoMetadata isnt installed
+					float headScale = 1.0f;
 
-					if (isInView) {
-						string username = await Util.GetUsernameFromUserId(userInfo.User._userId, photo.World);
+					if (extendedTagSlot != null && extendedTagSpace != null) {
+						bool viewTagFound = extendedTagSpace.TryReadValue<bool>($"{uid}.isInView", out isInView);
+						if (!viewTagFound) {
+							// user might be using older version of FixPhotoMetadata... (https://github.com/BlueberryWolf/FixPhotoMetadata/issues/1)
+							// work around by scanning components directly instead :')
+							Slot? userTagSlot = extendedTagSlot.FindChild(uid);
 
-						if (userInfo.User._userId == photo.TakenBy._userId) {
-							isSelfie = true;
+							if (userTagSlot != null) {
+								DynamicValueVariable<bool>? isInViewComponent = userTagSlot.GetComponents<DynamicValueVariable<bool>>().FirstOrDefault(v => v.VariableName.Value.Contains("isInView"));
+								if (isInViewComponent != null) {
+									isInView = isInViewComponent.Value.Value;
+								}
+							}
 						}
 
-						float3 userPos = userInfo.HeadPosition;
-						float3 toUser = userPos - photo.TakenGlobalPosition.Value;
+						bool scaleTagFound = extendedTagSpace.TryReadValue<float>($"{uid}.headScale", out headScale);
+						if (!scaleTagFound) {
+							// user might be using older version of FixPhotoMetadata... (https://github.com/BlueberryWolf/FixPhotoMetadata/issues/1)
+							// work around by scanning components directly instead :')
+							Slot? userTagSlot = extendedTagSlot.FindChild(uid);
 
-						floatQ inverseCamRot = photo.TakenGlobalRotation.Value.Inverted;
-						float3 localPos = inverseCamRot * toUser;
+							if (userTagSlot != null) {
+								DynamicValueVariable<float>? headScaleComponent = userTagSlot.GetComponents<DynamicValueVariable<float>>().FirstOrDefault(v => v.VariableName.Value.Contains("headScale"));
+								if (headScaleComponent != null) {
+									headScale = headScaleComponent.Value.Value;
+								}
+							}
+						}
+					}
+
+					float3 userPos = userInfo.HeadPosition;
+					float3 toUser = userPos - photo.TakenGlobalPosition.Value;
+					floatQ inverseCamRot = photo.TakenGlobalRotation.Value.Inverted;
+					float3 localPos = inverseCamRot * toUser;
+
+					// discard users who are definitely not visible in the photo
+					if (localPos.z > 0.05f) {
+						// assuming heads are at most .3 meters
+						float actualHeadSize = 0.3f * headScale;
+
+						float fovRad = photo.CameraFOV.Value * (MathF.PI / 180f);
+						float viewHeightAtDepth = 2f * localPos.z * MathF.Tan(fovRad / 2f);
+						float screenCoverage = actualHeadSize / viewHeightAtDepth;
+
+						if (screenCoverage < 0.015f) {
+							isInView = false;
+						}
+					}
+
+					if (isInView) {
+						string username = await Util.GetUsernameFromUserId(uid, photo.World);
+
+						if (uid == photo.TakenBy._userId.Value) {
+							isSelfie = true;
+						}
 
 						float screenX = localPos.x / localPos.z;
 
@@ -559,10 +605,51 @@ public class RSEPostExtensions : ResoniteMod {
 		if (url is null) return null;
 
 		List<GalleVRClient.Player> galleVRPlayers = new();
+		Slot? extendedTagSlot = photo.Slot.FindChild("PhotoMetadata_Tags");
+		DynamicVariableSpace? extendedTagSpace = extendedTagSlot?.FindSpace("PhotoMetadata");
+
 		foreach (AssetMetadata.UserInfo userInfo in photo.UserInfos) {
+			string? uid = userInfo.User._userId.Value;
+			if (uid is null) continue;
+
+			bool isInView = false;
+			float headScale = 1.0f;
+
+			if (extendedTagSlot != null && extendedTagSpace != null) {
+				bool viewTagFound = extendedTagSpace.TryReadValue<bool>($"{uid}.isInView", out isInView);
+				if (!viewTagFound) {
+					// user might be using older version of FixPhotoMetadata... (https://github.com/BlueberryWolf/FixPhotoMetadata/issues/1)
+					// work around by scanning components directly instead :')
+					Slot? userTagSlot = extendedTagSlot.FindChild(uid);
+
+					if (userTagSlot != null) {
+						DynamicValueVariable<bool>? isInViewComponent = userTagSlot.GetComponents<DynamicValueVariable<bool>>().FirstOrDefault(v => v.VariableName.Value.Contains("isInView"));
+						if (isInViewComponent != null) {
+							isInView = isInViewComponent.Value.Value;
+						}
+					}
+				}
+
+				bool scaleTagFound = extendedTagSpace.TryReadValue<float>($"{uid}.headScale", out headScale);
+				if (!scaleTagFound) {
+					// user might be using older version of FixPhotoMetadata... (https://github.com/BlueberryWolf/FixPhotoMetadata/issues/1)
+					// work around by scanning components directly instead :')
+					Slot? userTagSlot = extendedTagSlot.FindChild(uid);
+
+					if (userTagSlot != null) {
+						DynamicValueVariable<float>? headScaleComponent = userTagSlot.GetComponents<DynamicValueVariable<float>>().FirstOrDefault(v => v.VariableName.Value.Contains("headScale"));
+						if (headScaleComponent != null) {
+							headScale = headScaleComponent.Value.Value;
+						}
+					}
+				}
+			}
+
 			galleVRPlayers.Add(new GalleVRClient.Player {
-				Id = userInfo.User._userId,
-				Name = await Util.GetUsernameFromUserId(userInfo.User._userId, photo.World)
+				Id = uid,
+				DisplayName = await Util.GetUsernameFromUserId(uid, photo.World),
+				HeadPosition = GalleVRClient.Player.PackPosition(userInfo.HeadPosition.Value, headScale, isInView),
+				HeadOrientation = GalleVRClient.Player.PackOrientation(userInfo.HeadOrientation.Value)
 			});
 		}
 
@@ -584,7 +671,7 @@ public class RSEPostExtensions : ResoniteMod {
 				TakenDate = new DateTimeOffset(photo.TimeTaken.Value).ToUnixTimeMilliseconds(),
 				Filename = (photo.TimeTaken.Value.Kind == DateTimeKind.Utc ? photo.TimeTaken.Value.ToLocalTime() : photo.TimeTaken.Value).ToString("yyyy-MM-dd HH.mm.ss") + ".webp",
 				LocalPath = tmpPath,
-				CameraManufacturer = photo.CameraManufacturer.Value,
+				CameraManufacturer = photo.CameraManufacturer.Value ?? "Resonite",
 				Application = "Resonite",
 				IsNonVrcx = false,
 				CameraFov = photo.CameraFOV.Value,
@@ -592,19 +679,19 @@ public class RSEPostExtensions : ResoniteMod {
 				TakenGlobalRotation = GalleVRClient.SpatialData.FromFloatQ(photo.TakenGlobalRotation.Value),
 				TakenGlobalScale = GalleVRClient.SpatialData.FromFloat3(photo.TakenGlobalScale.Value),
 				World = new GalleVRClient.WorldMetadata() {
-					Id = photo.LocationURL.Value.OriginalString,
+					Id = photo.LocationURL.Value?.OriginalString,
 					Name = photo.LocationName.Value
 				},
 				Players = galleVRPlayers
 			};
 
-			string? photoUrl = await GalleVRClient.UploadFileAsync(photo.TakenBy._userId, token, tmpPath, formattedMetadata, photo);
+			string? photoUrl = await GalleVRClient.UploadFileAsync(photo.TakenBy._userId.Value, token, tmpPath, formattedMetadata, photo);
 			// GalleVR returns the photo link (yay!) but going to it just redirects to an empty profile (bruh)
 			Msg($"Upload finished!");
 			return photoUrl;
 
 		} catch (Exception ex) {
-			Msg($"Misskey upload failed: {ex.Message}");
+			Msg($"GalleVR upload failed: {ex.Message}");
 
 			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to GalleVR!", colorX.Red, 0.7f, 5f);
 

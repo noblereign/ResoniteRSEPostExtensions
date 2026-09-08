@@ -69,8 +69,31 @@ public class GalleVRClient {
 		[JsonPropertyName("id")]
 		public required string Id { get; init; }
 
-		[JsonPropertyName("name")]
-		public required string Name { get; init; }
+		[JsonPropertyName("displayName")]
+		public required string DisplayName { get; init; }
+
+		[JsonPropertyName("headPosition")]
+		public required string HeadPosition { get; init; }
+
+		[JsonPropertyName("headOrientation")]
+		public required string HeadOrientation { get; init; }
+
+		public static string PackPosition(float3 pos, float scale, bool isInView) {
+			string x = pos.x.ToString(System.Globalization.CultureInfo.InvariantCulture);
+			string y = pos.y.ToString(System.Globalization.CultureInfo.InvariantCulture);
+			string z = pos.z.ToString(System.Globalization.CultureInfo.InvariantCulture);
+			string s = scale.ToString(System.Globalization.CultureInfo.InvariantCulture);
+			string v = isInView ? "1" : "0";
+			return $"[{x}; {y}; {z}; {s}; {v}]";
+		}
+
+		public static string PackOrientation(floatQ rot) {
+			string x = rot.x.ToString(System.Globalization.CultureInfo.InvariantCulture);
+			string y = rot.y.ToString(System.Globalization.CultureInfo.InvariantCulture);
+			string z = rot.z.ToString(System.Globalization.CultureInfo.InvariantCulture);
+			string w = rot.w.ToString(System.Globalization.CultureInfo.InvariantCulture);
+			return $"[{x}; {y}; {z}; {w}]";
+		}
 	}
 
 	public record WorldMetadata {
