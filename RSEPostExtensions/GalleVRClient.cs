@@ -202,7 +202,7 @@ public class GalleVRClient {
 			width,
 			height,
 			isTransparent
-		); // sadly this doesn't seem to be enough to get it to auto-tag people... hrm
+		);
 
 		return new MemoryStream(finalBytes);
 	}
