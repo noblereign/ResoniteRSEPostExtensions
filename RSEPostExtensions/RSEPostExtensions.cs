@@ -19,7 +19,7 @@ using ResoniteHotReloadLib;
 namespace RSEPostExtensions;
 
 public class RSEPostExtensions : ResoniteMod {
-	internal const string VERSION_CONSTANT = "3.1.1"; //Changing the version here updates it in all locations needed
+	internal const string VERSION_CONSTANT = "3.2.0"; //Changing the version here updates it in all locations needed
 	public override string Name => "RSEPostExtensions";
 	public override string Author => "Noble";
 	public override string Version => VERSION_CONSTANT;
@@ -351,13 +351,25 @@ public class RSEPostExtensions : ResoniteMod {
 		Slot? extendedTagSlot = photo.Slot.FindChild("PhotoMetadata_Tags");
 
 		string photographerName = await Util.GetUsernameFromUserId(photo.TakenBy._userId, photo.World);
-		string altText = $"A Resonite photo taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(photo.LocationName)}.";
+
+		var (article, lensType, standardType, selfieType) = photo.CameraFOV.Value switch {
+			>= 179f => ("A", "360°", "capture ", "capture"),
+			> 85f => ("An", "ultra-wide ", "photo", "selfie"),
+			> 65f => ("A", "wide-angle ", "photo", "selfie"),
+			< 40f => ("A", "telephoto ", "shot", "portrait"),
+			_ => ("A", "", "photo", "selfie")
+		};
+
+		float fovRad = photo.CameraFOV.Value * (MathF.PI / 180f);
+		float tanHalfFov = MathF.Tan(fovRad / 2f);
+
+		string altText = $"{article} {lensType}{standardType} from Resonite, taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(photo.LocationName)}.";
 		string postBodyText = await FormatMisskeyPostBody(Config!.GetValue(MisskeyPostBody) ?? "", photo, photographerName);
 
 		if (extendedTagSlot != null) {
 			DynamicVariableSpace extendedTagSpace = extendedTagSlot.FindSpace("PhotoMetadata");
 			if (extendedTagSpace != null) {
-				List<(string username, float screenX)> usersData = new List<(string, float)>();
+				List<(string uid, string username, float screenX, float distance)> usersData = new();
 				bool isSelfie = false;
 
 				Msg("Processing extended tags...");
@@ -406,7 +418,6 @@ public class RSEPostExtensions : ResoniteMod {
 						// assuming heads are at most .3 meters
 						float actualHeadSize = 0.3f * headScale;
 
-						float fovRad = photo.CameraFOV.Value * (MathF.PI / 180f);
 						float viewHeightAtDepth = 2f * localPos.z * MathF.Tan(fovRad / 2f);
 						float screenCoverage = actualHeadSize / viewHeightAtDepth;
 
@@ -422,32 +433,105 @@ public class RSEPostExtensions : ResoniteMod {
 							isSelfie = true;
 						}
 
-						float screenX = localPos.x / localPos.z;
+						float tanTheta = localPos.x / localPos.z;
+						float screenX = tanTheta / tanHalfFov;
 
-						usersData.Add((username, screenX));
+						usersData.Add((uid, username, screenX, localPos.z));
 					}
 				}
 
-				// sort by left to right
-				string[] visibleUsers = usersData
-					.OrderBy(u => u.screenX)
-					.Select(u => u.username)
-					.ToArray();
-
-				string baseText = $"A {(isSelfie ? "selfie" : "photo")} taken by {photographerName} on Resonite. Captured in {RSE.PhotoMetadata_Patch.SanitizeText(photo.LocationName)}";
-				string formattedUsers = ".";
-
-				if (visibleUsers.Length == 1) {
-					if (!isSelfie) {
-						formattedUsers = $", featuring {visibleUsers[0]}.";
-					}
-				} else if (visibleUsers.Length == 2) {
-					formattedUsers = $", with {visibleUsers[0]} and {visibleUsers[1]} together in the {(isSelfie ? "shot" : "photo")}.";
-				} else if (visibleUsers.Length >= 3) {
-					formattedUsers = $". {visibleUsers.Length} users are visible.\n Listed from left to right, they are: {string.Join(", ", visibleUsers.Take(visibleUsers.Length - 1))}, and {visibleUsers.Last()}.";
+				string JoinSegments(List<string> segs) {
+					if (segs.Count == 0) return "";
+					if (segs.Count == 1) return segs[0];
+					if (segs.Count == 2) return $"{segs[0]} and {segs[1]}";
+					return $"{string.Join(", ", segs.Take(segs.Count - 1))}, and {segs.Last()}";
 				}
 
-				altText = $"{baseText}{formattedUsers}";
+				string FormatPositions(List<(string uid, string username, float screenX, float distance)> users) {
+					var left = users.Where(u => u.screenX < -0.3f).Select(u => u.username).ToList();
+					var center = users.Where(u => u.screenX >= -0.3f && u.screenX <= 0.3f).Select(u => u.username).ToList();
+					var right = users.Where(u => u.screenX > 0.3f).Select(u => u.username).ToList();
+
+					List<string> segments = new List<string>();
+					if (left.Count > 0) segments.Add($"{JoinSegments(left)} on the left");
+					if (center.Count > 0) segments.Add($"{JoinSegments(center)} in the center");
+					if (right.Count > 0) segments.Add($"{JoinSegments(right)} on the right");
+
+					return JoinSegments(segments);
+				}
+
+				// if it's a solo selfie then don't bother mentioning where they are
+				if (usersData.Count == 1 && usersData[0].uid == photo.TakenBy._userId) {
+					usersData.Clear();
+				}
+
+				int totalUsers = usersData.Count;
+				string crowdText = totalUsers >= 5 ? $". {totalUsers} users are visible in the photo" : "";
+				string baseText = $"{article} {lensType}{(isSelfie ? selfieType : standardType)} from Resonite, taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(photo.LocationName)}{crowdText}.";
+
+				float depthThreshold = photo.CameraFOV.Value switch {
+					>= 179f => 2.0f,
+					> 85f => 2.5f,
+					> 65f => 3.0f,
+					< 40f => 6.0f,
+					_ => 4.0f
+				};
+
+				var foregroundUsers = usersData.Where(u => u.distance < depthThreshold).ToList();
+				var backgroundUsers = usersData.Where(u => u.distance >= depthThreshold).ToList();
+
+				string subjectText = "";
+				float togetherThreshold = 1f;
+				string shotWord = isSelfie ? "shot" : "photo";
+
+				int fgLimit = 6;
+				int totalLimit = 10;
+
+				if (totalUsers == 0) {
+					subjectText = "";
+				} else if (foregroundUsers.Count > fgLimit) {
+					// theres absolutely too many people in this photo for alt text
+					subjectText = $"That's too many to list everyone individually.";
+				} else if (totalUsers > totalLimit) {
+					// list out foreground but not background because of crowding
+					if (foregroundUsers.Count > 0) {
+						bool fgTogether = foregroundUsers.Count == 2 && Math.Abs(foregroundUsers[0].screenX - foregroundUsers[1].screenX) < togetherThreshold;
+						string fgText = fgTogether
+							? $"{foregroundUsers[0].username} and {foregroundUsers[1].username} together"
+							: FormatPositions(foregroundUsers);
+
+						subjectText = $" It features {fgText}. In the background, there's a crowd of {backgroundUsers.Count} other users.";
+					} else {
+						subjectText = $" In the distance, there's a crowd of {backgroundUsers.Count} users.";
+					}
+				} else if (foregroundUsers.Count > 0 && backgroundUsers.Count == 0) {
+					// only foreground
+					bool fgTogether = foregroundUsers.Count == 2 && Math.Abs(foregroundUsers[0].screenX - foregroundUsers[1].screenX) < togetherThreshold;
+					subjectText = fgTogether
+						? $" {foregroundUsers[0].username} and {foregroundUsers[1].username} are together in the {shotWord}."
+						: $" It features {FormatPositions(foregroundUsers)}.";
+				} else if (foregroundUsers.Count == 0 && backgroundUsers.Count > 0) {
+					// only background
+					bool bgTogether = backgroundUsers.Count == 2 && Math.Abs(backgroundUsers[0].screenX - backgroundUsers[1].screenX) < togetherThreshold;
+					subjectText = bgTogether
+						? $" You can see {backgroundUsers[0].username} and {backgroundUsers[1].username} in the distance together."
+						: $" In the distance, you can see {FormatPositions(backgroundUsers)}.";
+				} else {
+					// mixed depth
+					bool fgTogether = foregroundUsers.Count == 2 && Math.Abs(foregroundUsers[0].screenX - foregroundUsers[1].screenX) < togetherThreshold;
+					string fgText = fgTogether
+						? $"{foregroundUsers[0].username} and {foregroundUsers[1].username} together"
+						: FormatPositions(foregroundUsers);
+
+					bool bgTogether = backgroundUsers.Count == 2 && Math.Abs(backgroundUsers[0].screenX - backgroundUsers[1].screenX) < togetherThreshold;
+					string bgText = bgTogether
+						? $"{backgroundUsers[0].username} and {backgroundUsers[1].username} together"
+						: FormatPositions(backgroundUsers);
+
+					subjectText = $" It features {fgText}. In the background, you can spot {bgText}.";
+				}
+
+				altText = $"{baseText}{subjectText}";
 			}
 		}
 
