@@ -69,8 +69,8 @@ public class GalleVRClient {
 		[JsonPropertyName("id")]
 		public required string Id { get; init; }
 
-		[JsonPropertyName("displayName")]
-		public required string DisplayName { get; init; }
+		[JsonPropertyName("name")]
+		public required string Name { get; init; }
 
 		[JsonPropertyName("headPosition")]
 		public required string HeadPosition { get; init; }
