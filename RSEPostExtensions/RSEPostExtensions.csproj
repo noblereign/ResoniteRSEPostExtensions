@@ -7,6 +7,7 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<!-- Change CopyToMods to true if you'd like builds to be moved into the Mods folder automatically-->
 		<CopyToMods Condition="'$(CopyToMods)'==''">true</CopyToMods>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
 	</PropertyGroup>
 
 	<PropertyGroup Condition="'$(ResonitePath)'==''">

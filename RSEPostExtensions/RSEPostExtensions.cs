@@ -19,7 +19,7 @@ using ResoniteHotReloadLib;
 namespace RSEPostExtensions;
 
 public class RSEPostExtensions : ResoniteMod {
-	internal const string VERSION_CONSTANT = "3.0.1"; //Changing the version here updates it in all locations needed
+	internal const string VERSION_CONSTANT = "3.0.2"; //Changing the version here updates it in all locations needed
 	public override string Name => "RSEPostExtensions";
 	public override string Author => "Noble";
 	public override string Version => VERSION_CONSTANT;
@@ -355,7 +355,7 @@ public class RSEPostExtensions : ResoniteMod {
 		string postBodyText = await FormatMisskeyPostBody(Config!.GetValue(MisskeyPostBody) ?? "", photo, photographerName);
 
 		if (extendedTagSlot != null) {
-			DynamicVariableSpace extendedTagSpace = extendedTagSlot.FindSpace("Avatar");
+			DynamicVariableSpace extendedTagSpace = extendedTagSlot.FindSpace("PhotoMetadata");
 			if (extendedTagSpace != null) {
 				List<(string username, float screenX)> usersData = new List<(string, float)>();
 				bool isSelfie = false;
