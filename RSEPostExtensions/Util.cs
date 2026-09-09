@@ -1,12 +1,13 @@
 ﻿using System.Collections.Concurrent;
+using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-
 using FrooxEngine;
 
 namespace RSEPostExtensions;
 internal class Util {
+	private static readonly HttpClient _http = new();
 	private static readonly string[] Adjectives = {
 		"Swift", "Clever", "Brave", "Bright", "Calm", "Eager", "Kind", "Lively",
 		"Silly", "Wild", "Gentle", "Fancy", "Proud", "Jolly", "Vast", "Sharp",
@@ -104,5 +105,71 @@ internal class Util {
 		if (user.IsOK)
 			return user.Entity.Username;
 		return userId;
+	}
+
+	public static Uri? ResrecToGoResonite(Uri? locationUrl) {
+		string? urlStr = locationUrl?.ToString();
+
+		if (string.IsNullOrEmpty(urlStr)) return null;
+
+		if (urlStr.StartsWith("resrec://", StringComparison.OrdinalIgnoreCase)) {
+			string cleanPath = urlStr.Substring(9).TrimStart('/');
+			return new Uri($"https://go.resonite.com/world/{cleanPath}");
+		}
+
+		return locationUrl;
+	}
+
+	public static async Task<(string WorldName, string OwnerName, bool IsPublic)?> FetchWorldDetailsFromUrlAsync(Uri worldUrl) {
+		try {
+			string[] parts = worldUrl.OriginalString.TrimEnd('/').Split('/');
+			if (parts.Length < 2) return null;
+
+			string recordId = parts[^1];
+			string ownerId = parts[^2];
+			bool isGroup = ownerId.StartsWith("G-");
+			string basePath = isGroup ? "groups" : "users";
+
+			string recordEndpoint = $"https://api.resonite.com/{basePath}/{ownerId}/records/{recordId}";
+			var recordData = await _http.GetFromJsonAsync<JsonElement>(recordEndpoint);
+
+			bool isPublic = false;
+			if (recordData.TryGetProperty("isPublic", out var pubProp)) {
+				isPublic = pubProp.GetBoolean();
+			}
+
+			string worldName = recordData.GetProperty("name").GetString() ?? "A Resonite World";
+
+			string ownerEndpoint = $"https://api.resonite.com/{basePath}/{ownerId}";
+			var ownerData = await _http.GetFromJsonAsync<JsonElement>(ownerEndpoint);
+
+			string ownerProp = isGroup ? "name" : "username";
+			string ownerName = ownerData.GetProperty(ownerProp).GetString() ?? "Unknown Creator";
+
+			return (worldName, ownerName, isPublic);
+		} catch (Exception ex) {
+			RSEPostExtensions.Warn($"Failed to fetch world metadata: {ex.Message}");
+			return null;
+		}
+	}
+
+	public static async Task<(string worldName, string worldOwner, Uri? worldUrl)> GetWorldDetailsFromMetadataAsync(PhotoMetadata photo) {
+		string worldName = "A Resonite World";
+		string worldOwner = "Unknown Creator";
+		Uri? worldUrl = ResrecToGoResonite(photo.LocationURL.Value);
+
+		if (photo.LocationURL.Value != null) {
+			var apiResult = await FetchWorldDetailsFromUrlAsync(photo.LocationURL.Value);
+
+			if (apiResult != null && apiResult.Value.IsPublic) {
+				worldName = apiResult.Value.WorldName;
+				worldOwner = apiResult.Value.OwnerName;
+			} else {
+				worldName = photo.LocationName?.Value ?? "Unknown Location";
+				worldOwner = (photo.LocationHost?._userId != null) ? await GetUsernameFromUserId(photo.LocationHost._userId, photo.World) : "Unknown Creator";
+				worldUrl = null;
+			}
+		}
+		return (worldName, worldOwner, worldUrl);
 	}
 }
