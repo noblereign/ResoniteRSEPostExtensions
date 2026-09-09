@@ -3,8 +3,9 @@
 A [ResoniteModLoader](https://github.com/resonite-modding-group/ResoniteModLoader) mod for [Resonite](https://resonite.com/) that adds more posting options to [ResoniteScreenshotExtensions](https://github.com/hantabaru1014/ResoniteScreenshotExtensions).
 
 Currently allows you to: 
-- Add multiple Discord webhooks
-- Upload and share to Misskey-based fediverse software (e.g. Sharkey, Iceshrimp-js, and of course Misskey itself)
+- Add multiple [Discord](https://discord.com/) webhooks
+- Upload and share to Misskey-based fediverse software (e.g. [Sharkey](https://joinsharkey.org/), [Iceshrimp-js](https://iceshrimp.dev/iceshrimp/iceshrimp), and of course [Misskey](https://misskey-hub.net/) itself)
+- Upload directly to [Bluesky](https://bsky.app/)
 - Upload directly to [GalleVR](https://gallevr.app)
 
 Planned:
