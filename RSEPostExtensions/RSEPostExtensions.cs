@@ -25,7 +25,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 	const string harmonyId = "dog.glacier.RSEPostExtensions";
 
-	public static ModConfiguration? Config;
+	private static ModConfiguration? Config;
 
 	[AutoRegisterConfigKey]
 	public static readonly ModConfigurationKey<bool> Enabled = new("Enabled", "Enables the mod.", () => true);

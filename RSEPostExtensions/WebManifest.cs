@@ -1,4 +1,5 @@
 ﻿using System.Text.Json.Serialization;
+namespace RSEPostExtensions;
 public class WebManifest {
 	[JsonPropertyName("short_name")]
 	public string? ShortName { get; set; }

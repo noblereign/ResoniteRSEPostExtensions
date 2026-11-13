@@ -8,7 +8,7 @@ using SixLabors.ImageSharp.Processing;
 using static RSEPostExtensions.BlueskyClient;
 
 namespace RSEPostExtensions;
-public class BlueskyClient {
+public partial class BlueskyClient {
 	private static readonly HttpClient _http = new();
 
 	public record SessionRequest(
@@ -59,7 +59,7 @@ public class BlueskyClient {
 			if (did.StartsWith("did:plc:")) {
 				didDoc = await _http.GetFromJsonAsync<JsonDocument>($"https://plc.directory/{did}");
 			} else if (did.StartsWith("did:web:")) {
-				string domain = did.Substring(8);
+				string domain = did[8..];
 				didDoc = await _http.GetFromJsonAsync<JsonDocument>($"https://{domain}/.well-known/did.json");
 			}
 
@@ -68,7 +68,7 @@ public class BlueskyClient {
 					if (service.TryGetProperty("id", out var idVal) && idVal.GetString() == "#atproto_pds") {
 						if (service.TryGetProperty("serviceEndpoint", out var endpoint)) {
 							string endpointStr = endpoint.GetString()!;
-							if (!endpointStr.EndsWith("/")) endpointStr += "/";
+							if (!endpointStr.EndsWith('/')) endpointStr += "/";
 							return new Uri(endpointStr);
 						}
 					}
@@ -167,9 +167,9 @@ public class BlueskyClient {
 		var sb = new System.Text.StringBuilder();
 		int lastIndex = 0;
 
-		var markdownRegex = new System.Text.RegularExpressions.Regex(@"\[(.*?)\]\((.*?)\)");
+		var markdownRegex = LinkFacetRegex();
 		foreach (System.Text.RegularExpressions.Match match in markdownRegex.Matches(text)) {
-			sb.Append(text.Substring(lastIndex, match.Index - lastIndex));
+			sb.Append(text[lastIndex..match.Index]);
 
 			string linkText = match.Groups[1].Value;
 			string linkUrl = match.Groups[2].Value;
@@ -191,15 +191,15 @@ public class BlueskyClient {
 			lastIndex = match.Index + match.Length;
 		}
 
-		sb.Append(text.Substring(lastIndex));
+		sb.Append(text[lastIndex..]);
 		string cleanText = sb.ToString();
 
-		var tagRegex = new System.Text.RegularExpressions.Regex(@"(?<=^|\s)(#[\p{L}\p{N}_]+)");
-		var urlRegex = new System.Text.RegularExpressions.Regex(@"(?<=^|\s)(https?://[^\s<]+[^<.,;:!?\'\""\s])");
-		var mentionRegex = new System.Text.RegularExpressions.Regex(@"(?<=^|\s)(@([a-zA-Z0-9-]+\.)+[a-zA-Z0-9-]+)");
+		var tagRegex = HashtagFacetRegex();
+		var urlRegex = URLFacetRegex();
+		var mentionRegex = MentionFacetRegex();
 
 		foreach (System.Text.RegularExpressions.Match match in tagRegex.Matches(cleanText)) {
-			int byteStart = System.Text.Encoding.UTF8.GetByteCount(cleanText.Substring(0, match.Index));
+			int byteStart = System.Text.Encoding.UTF8.GetByteCount(cleanText[..match.Index]);
 			int byteEnd = byteStart + System.Text.Encoding.UTF8.GetByteCount(match.Value);
 
 			facets.Add(new Dictionary<string, object> {
@@ -214,7 +214,7 @@ public class BlueskyClient {
 		}
 
 		foreach (System.Text.RegularExpressions.Match match in urlRegex.Matches(cleanText)) {
-			int byteStart = System.Text.Encoding.UTF8.GetByteCount(cleanText.Substring(0, match.Index));
+			int byteStart = System.Text.Encoding.UTF8.GetByteCount(cleanText[..match.Index]);
 			int byteEnd = byteStart + System.Text.Encoding.UTF8.GetByteCount(match.Value);
 
 			facets.Add(new Dictionary<string, object> {
@@ -242,7 +242,7 @@ public class BlueskyClient {
 			}
 
 			if (!string.IsNullOrEmpty(did)) {
-				int byteStart = System.Text.Encoding.UTF8.GetByteCount(cleanText.Substring(0, match.Index));
+				int byteStart = System.Text.Encoding.UTF8.GetByteCount(cleanText[..match.Index]);
 				int byteEnd = byteStart + System.Text.Encoding.UTF8.GetByteCount(match.Value);
 
 				facets.Add(new Dictionary<string, object> {
@@ -284,12 +284,12 @@ public class BlueskyClient {
 			}}
 		};
 
-		var facetResult = await ParseFacetsAsync(text);
+		var (cleanText, facets) = await ParseFacetsAsync(text);
 
-		record["text"] = facetResult.cleanText;
+		record["text"] = cleanText;
 
-		if (facetResult.facets.Count > 0) {
-			record["facets"] = facetResult.facets;
+		if (facets.Count > 0) {
+			record["facets"] = facets;
 		}
 
 		var payload = new {
@@ -336,15 +336,15 @@ public class BlueskyClient {
 			}}
 		};
 
-		var facetResult = await ParseFacetsAsync(text);
+		var (cleanText, facets) = await ParseFacetsAsync(text);
 
-		record["text"] = facetResult.cleanText;
+		record["text"] = cleanText;
 
-		if (facetResult.facets.Count > 0) {
-			record["facets"] = facetResult.facets;
+		if (facets.Count > 0) {
+			record["facets"] = facets;
 		}
 
-		var payload = new { repo = did, collection = "app.bsky.feed.post", record = record };
+		var payload = new { repo = did, collection = "app.bsky.feed.post", record };
 
 		using var request = new HttpRequestMessage(HttpMethod.Post, recordEndpoint);
 		request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
@@ -362,6 +362,15 @@ public class BlueskyClient {
 			throw new HttpRequestException($"Bluesky API Error ({response.StatusCode}): {errorBody}");
 		}
 	}
+
+	[System.Text.RegularExpressions.GeneratedRegex(@"\[(.*?)\]\((.*?)\)")]
+	private static partial System.Text.RegularExpressions.Regex LinkFacetRegex();
+	[System.Text.RegularExpressions.GeneratedRegex(@"(?<=^|\s)(#[\p{L}\p{N}_]+)")]
+	private static partial System.Text.RegularExpressions.Regex HashtagFacetRegex();
+	[System.Text.RegularExpressions.GeneratedRegex(@"(?<=^|\s)(https?://[^\s<]+[^<.,;:!?\'\""\s])")]
+	private static partial System.Text.RegularExpressions.Regex URLFacetRegex();
+	[System.Text.RegularExpressions.GeneratedRegex(@"(?<=^|\s)(@([a-zA-Z0-9-]+\.)+[a-zA-Z0-9-]+)")]
+	private static partial System.Text.RegularExpressions.Regex MentionFacetRegex();
 }
 public class BlueskySessionState {
 	public Uri PdsUrl { get; set; } = new Uri("https://bsky.social/");
