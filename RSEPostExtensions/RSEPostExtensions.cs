@@ -1046,20 +1046,42 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 		metadata.StartGlobalTask(async () =>
 		{
-			var tex = metadata.Slot.GetComponent<StaticTexture2D>();
-			var url = tex?.URL.Value;
-			if (url is null) return;
-		
-			await new ToBackground();
-			var tmpPath = await metadata.Engine.AssetManager.GatherAssetFile(url, 100f);
-			if (tmpPath is null) return;
-			_urlMappings[tmpPath] = webhookUri;
-			if (metadata is PhotoMetadata photometa) {
-				RSE.PhotoMetadata_Patch.PostToDiscord(new Metadata(photometa), tmpPath);
-			} else if (metadata is VideoMetadata videometa) { //RSE doesn't support videos, we'll have to handle it ourselves
-				DiscordClient.PostVideoToDiscord(videometa, tmpPath, webhookUri);
-			} else {
-				NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Media type currently unsupported :(", colorX.Red, 0.7f, 5f);
+			switch (metadata) {
+				case PhotoMetadata metadata: 
+					{
+						StaticTexture2D? tex = metadata.Slot.GetComponent<StaticTexture2D>();
+						Uri? url = tex?.URL.Value;
+
+						if (url is null) break;
+
+						await new ToBackground();
+						string? tmpPath = await metadata.Engine.AssetManager.GatherAssetFile(url, 100f);
+						if (tmpPath is null) break;
+
+						Msg("Posting to Discord as photo");
+						_urlMappings[tmpPath] = webhookUri;
+						RSE.PhotoMetadata_Patch.PostToDiscord(new Metadata(metadata), tmpPath);
+						break; 
+					}
+				case VideoMetadata metadata: //RSE doesn't support videos, we'll have to handle it ourselves
+					{
+						VideoPlayerInterface? playerInterface = metadata.Slot.GetComponent<VideoPlayerInterface>();
+						if (playerInterface is null || playerInterface.URL.Target is null) break;
+						Uri? url = playerInterface.URL.Target.Value;
+						if (url is null) break;
+
+						await new ToBackground();
+						string? tmpPath = await metadata.Engine.AssetManager.GatherAssetFile(url, 100f);
+						if (tmpPath is null) break;
+
+						Msg("Posting to Discord as video");
+						DiscordClient.PostVideoToDiscord(metadata, tmpPath, webhookUri);
+						break;
+					}
+				default:
+					Msg("Posting to Discord as.. um.. what kind of file is this");
+					NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Media type currently unsupported :(", colorX.Red, 0.7f, 5f);
+					break;
 			}
 		});
 	}

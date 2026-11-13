@@ -1,10 +1,6 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
-
+﻿using System.Net.Http.Headers;
 using FrooxEngine;
 using ResoniteModLoader;
-using ResoniteScreenshotExtensions;
 using static ResoniteScreenshotExtensions.DiscordWebhookClient;
 using RSE = ResoniteScreenshotExtensions.ResoniteScreenshotExtensions;
 
@@ -13,7 +9,9 @@ namespace RSEPostExtensions;
 
 public class DiscordClient {
 	// referenced from https://github.com/hantabaru1014/ResoniteScreenshotExtensions/blob/main/Patches/PhotoMetadataPatch.cs
-	private static void PostVideoToDiscord(VideoMetadata metadata, string filePath, Uri webhookUrl) {
+	private static readonly HttpClient _client = new();
+
+	public static async void PostVideoToDiscord(VideoMetadata metadata, string filePath, Uri webhookUrl) {
 		ModConfiguration? RSEConfig = ModLoader.Mods().FirstOrDefault(m => m.Name == "ResoniteScreenshotExtensions")?.GetConfiguration();
 		if (RSEConfig == null) return;
 		ModConfigurationKey? DiscordWebhookEmbedLocationNameKey = RSEConfig?.ConfigurationItemDefinitions.FirstOrDefault(m => m.Name == "DiscordWebhookEmbedLocationName");
@@ -26,34 +24,51 @@ public class DiscordClient {
 
 		var fields = new List<EmbedField>();
 		if ((bool)RSEConfig!.GetValue(DiscordWebhookEmbedLocationNameKey)) {
-			fields.Add(new EmbedField("LocationName", RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName)));
+			fields.Add(new EmbedField("LocationName", RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName.Value)));
 		}
 		if ((bool)RSEConfig!.GetValue(DiscordWebhookEmbedLocationHostKey)) {
-			fields.Add(new EmbedField("LocationHost", RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationHost.Name ?? metadata.LocationHost._userId)));
+			fields.Add(new EmbedField("LocationHost", RSE.PhotoMetadata_Patch.SanitizeText(await Util.GetUsernameFromUserId(metadata.LocationHost._userId.Value, metadata.World))));
 		}
-		fields.Add(new EmbedField("TakenBy", RSE.PhotoMetadata_Patch.SanitizeText(metadata.TakenBy.Name ?? metadata.TakenBy._userId)));
+		fields.Add(new EmbedField("TakenBy", RSE.PhotoMetadata_Patch.SanitizeText(await Util.GetUsernameFromUserId(metadata.TakenBy._userId.Value, metadata.World))));
 		var unixTimestamp = (int)metadata.TimeTaken.Value.ToUniversalTime().Subtract(new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
 		fields.Add(new EmbedField("TimeTaken", $"<t:{unixTimestamp}>"));
 		if ((bool)RSEConfig!.GetValue(DiscordWebhookEmbedUsersKey)) {
-			fields.Add(new EmbedField("Users", metadata.UserInfos.Select(u => RSE.PhotoMetadata_Patch.SanitizeText(u.User.Name ?? u.User._userId)).Aggregate((acc, curr) => $"{acc}, {curr}")));
-		}
+			IEnumerable<Task<string>> userTasks = metadata.UserInfos.Select(async u =>
+				RSE.PhotoMetadata_Patch.SanitizeText(await Util.GetUsernameFromUserId(u.User._userId, metadata.World))
+			);
 
-		var client = new DiscordWebhookClient(webhookUrl.OriginalString);
-		try {
-			_ = client.SendImageWithMetadata(filePath, fields).ContinueWith(t =>
-			{
-				if (t.IsFaulted) {
-					RSEPostExtensions.Error("Failed to send video to Discord: " + t.Exception);
-				} else {
-					if (t.Result) {
-						RSEPostExtensions.Msg("Video sent to Discord successfully.");
-					} else {
-						RSEPostExtensions.Error("Failed to send video to Discord");
-					}
-				}
-			});
-		} catch (Exception ex) {
-			RSEPostExtensions.Error(ex);
+			string[] usernames = await Task.WhenAll(userTasks);
+
+			fields.Add(new EmbedField("Users", string.Join(", ", usernames)));
+		}
+		
+
+		var json = $"{{\"embeds\": [{{\"fields\": [{fields.Select(f => f.ToJson()).Aggregate((acc, curr) => $"{acc}, {curr}")}]}}]}}";
+
+		_ = SendVideo(filePath, webhookUrl, json);
+	}
+
+	private static async Task<bool> SendVideo(string srcPath, Uri webhookUrl, string? payloadJson = null) {
+		using (FileStream fileStream = File.OpenRead(srcPath)) {
+			FileInfo fileType = new(srcPath);
+			fileStream.Seek(0, SeekOrigin.Begin);
+			var fileContent = new StreamContent(fileStream);
+			fileContent.Headers.ContentType = new MediaTypeHeaderValue(Util.GuessVideoMimeType(fileStream));
+			fileContent.Headers.ContentDisposition = new ContentDispositionHeaderValue("attachment") {
+				FileName = $"video.{fileType.Extension}",
+			};
+
+			var request = new HttpRequestMessage(HttpMethod.Post, webhookUrl);
+			var form = new MultipartFormDataContent {
+				{ fileContent, "file" }
+			};
+			if (payloadJson != null) {
+				form.Add(new StringContent(payloadJson), "payload_json");
+			}
+			request.Content = form;
+
+			var response = await _client.SendAsync(request);
+			return response.IsSuccessStatusCode;
 		}
 	}
 }

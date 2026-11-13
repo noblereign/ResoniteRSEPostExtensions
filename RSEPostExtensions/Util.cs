@@ -92,6 +92,52 @@ internal class Util {
 		return "application/octet-stream";
 	}
 
+	public static string GuessVideoMimeType(FileStream stream) {
+		if (stream.Length < 16) return "application/octet-stream";
+
+		byte[] header = new byte[16];
+		stream.ReadExactly(header, 0, 16);
+
+		stream.Position = 0;
+
+		if (header[4] == 0x66 && header[5] == 0x74 && header[6] == 0x79 && header[7] == 0x70) {
+			if (header[8] == 0x71 && header[9] == 0x74 && header[10] == 0x20 && header[11] == 0x20) {
+				return "video/quicktime";
+			}
+			return "video/mp4";
+		}
+
+		if (header[0] == 0x52 && header[1] == 0x49 && header[2] == 0x46 && header[3] == 0x46 &&
+			header[8] == 0x41 && header[9] == 0x56 && header[10] == 0x49 && header[11] == 0x20) {
+			return "video/x-msvideo";
+		}
+
+		if (header[0] == 0x1A && header[1] == 0x45 && header[2] == 0xDF && header[3] == 0xA3) {
+			return "video/webm";
+		}
+
+		if (header[0] == 0x46 && header[1] == 0x4C && header[2] == 0x56){
+			return "video/x-flv";
+		}
+
+		if (header[0] == 0x00 && header[1] == 0x00 && header[2] == 0x01 && (header[3] == 0xBA || header[3] == 0xB3)) {
+			return "video/mpeg";
+		}
+
+		if (header[0] == 0x4F && header[1] == 0x67 && header[2] == 0x67 && header[3] == 0x53) {
+			return "video/ogg";
+		}
+
+		if (header[0] == 0x30 && header[1] == 0x26 && header[2] == 0xB2 && header[3] == 0x75 &&
+			header[4] == 0x8E && header[5] == 0x66 && header[6] == 0xCF && header[7] == 0x11 &&
+			header[8] == 0xA6 && header[9] == 0xD9 && header[10] == 0x00 && header[11] == 0xAA &&
+			header[12] == 0x00 && header[13] == 0x62 && header[14] == 0xCE && header[15] == 0x6C) {
+			return "video/x-ms-wmv";
+		}
+
+		return "application/octet-stream";
+	}
+
 	public static async Task<string> GetUsernameFromUserId(string userId, World? world) {
 		if (world != null) {
 			User ingameUser = world.GetUserByUserId(userId);
