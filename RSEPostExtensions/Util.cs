@@ -15,6 +15,8 @@ using SixLabors.ImageSharp.Processing;
 
 using FrooxEngine;
 
+using Metadata = ResoniteScreenshotExtensions.Metadata;
+using RSE = ResoniteScreenshotExtensions.ResoniteScreenshotExtensions;
 
 namespace RSEPostExtensions;
 internal class Util {
@@ -427,81 +429,104 @@ internal class Util {
 		}
 	}
 
-	public static async Task<System.IO.Stream> CompressImageAndInjectXmpAsync(PhotoMetadata photo, string localFilePath, double targetMiB = 9.5) {
+
+	public static async Task<MemoryStream> CompressImageAsync(string filePath, double targetMiB = 9.5, int maxDimension = int.MaxValue, int webpQuality = 100, long maxPixels = long.MaxValue, Func<byte[], int, int, byte[]>? postProcess = null) {
 		long maxBytes = (long)(targetMiB * 1024 * 1024);
 
-		using var image = await Image.LoadAsync(localFilePath);
-
-		if (image.Width > 1920) {
-			image.Mutate(x => x.Resize(1920, 0));
-		}
-
-		bool isTransparent = true;
-		var rseMetadata = new ResoniteScreenshotExtensions.Metadata(photo);
-		using var compressedStream = new MemoryStream();
-
-		async Task<byte[]> EncodeWithXmpAsync(int quality) {
-			compressedStream.SetLength(0);
-			compressedStream.Position = 0;
-
-			var encoder = new WebpEncoder {
-				FileFormat = WebpFileFormatType.Lossy,
-				Quality = quality
-			};
-
-			await image.SaveAsync(compressedStream, encoder);
-
-			return ResoniteScreenshotExtensions.MetadataInjector.InjectXmp(
-				compressedStream.ToArray(),
-				ResoniteScreenshotExtensions.ResoniteScreenshotExtensions.ImageFormat.WEBP,
-				rseMetadata,
-				image.Width,
-				image.Height,
-				isTransparent
-			);
-		}
-
-		// Fast path: 1 encode for the vast majority of screenshots
-		const int initialQuality = 80;
-		byte[] bestBytes = await EncodeWithXmpAsync(initialQuality);
-		if (bestBytes.Length <= maxBytes) {
-			return new MemoryStream(bestBytes);
-		}
-
-		// Binary search for the highest quality that fits under maxBytes (max ~5 iterations)
-		const int minQuality = 20;
-		int low = minQuality;
-		int high = initialQuality - 1;
-		byte[]? validFit = null;
-
-		while (low <= high) {
-			int mid = (low + high) / 2;
-			byte[] candidate = await EncodeWithXmpAsync(mid);
-
-			if (candidate.Length <= maxBytes) {
-				validFit = candidate;
-				low = mid + 1; // Fits; try pushing quality higher
-			} else {
-				high = mid - 1; // Still too large; lower quality
+		using (Image image = await Image.LoadAsync(filePath)) {
+			// max dimension
+			int longestSide = Math.Max(image.Width, image.Height);
+			if (longestSide > maxDimension) {
+				double scale = (double)maxDimension / longestSide;
+				int newWidth = Math.Max(1, (int)Math.Round(image.Width * scale));
+				int newHeight = Math.Max(1, (int)Math.Round(image.Height * scale));
+				image.Mutate(x => x.Resize(newWidth, newHeight));
 			}
-		}
 
-		if (validFit != null) {
-			return new MemoryStream(validFit);
-		}
-
-		// Fallback: even Quality 20 exceeded maxBytes (e.g. tight targetMiB or extreme noise) -> step down resolution
-		while (image.Width > 480) {
-			int nextWidth = (int)(image.Width * 0.75);
-			image.Mutate(x => x.Resize(nextWidth, 0));
-
-			byte[] scaledCandidate = await EncodeWithXmpAsync(45);
-			if (scaledCandidate.Length <= maxBytes) {
-				return new MemoryStream(scaledCandidate);
+			// max pixels
+			long currentPixels = (long)image.Width * image.Height;
+			if (currentPixels > maxPixels) {
+				double areaScale = Math.Sqrt((double)maxPixels / currentPixels);
+				int newWidth = Math.Max(1, (int)Math.Floor(image.Width * areaScale));
+				int newHeight = Math.Max(1, (int)Math.Floor(image.Height * areaScale));
+				image.Mutate(x => x.Resize(newWidth, newHeight));
 			}
-		}
 
-		// Last-resort floor
-		return new MemoryStream(await EncodeWithXmpAsync(minQuality));
+			using var compressedStream = new MemoryStream();
+
+			async Task<byte[]> EncodeCandidateAsync(int quality) {
+				compressedStream.SetLength(0);
+				compressedStream.Position = 0;
+
+				var encoder = new WebpEncoder {
+					FileFormat = WebpFileFormatType.Lossy,
+					Quality = quality
+				};
+
+				await image.SaveAsync(compressedStream, encoder);
+				byte[] rawBytes = compressedStream.ToArray();
+
+				return postProcess != null
+					? postProcess(rawBytes, image.Width, image.Height)
+					: rawBytes;
+			}
+
+			// webp quality
+			int initialQuality = Math.Clamp(webpQuality, 0, 100);
+			byte[] bestBytes = await EncodeCandidateAsync(initialQuality);
+			if (bestBytes.Length <= maxBytes) {
+				return new MemoryStream(bestBytes);
+			}
+
+			// still too big so thanos method until it isnt
+			const int minQuality = 20;
+			int low = minQuality;
+			int high = initialQuality - 1;
+			byte[]? validFit = null;
+
+			while (low <= high) {
+				int mid = (low + high) / 2;
+				byte[] candidate = await EncodeCandidateAsync(mid);
+
+				if (candidate.Length <= maxBytes) {
+					validFit = candidate;
+					low = mid + 1;
+				} else {
+					high = mid - 1;
+				}
+			}
+
+			if (validFit != null) {
+				return new MemoryStream(validFit);
+			}
+
+			// dear god we're cooked, make it tinier?????
+			int stepQuality = Math.Min(45, initialQuality);
+			while (Math.Max(image.Width, image.Height) > 480) {
+				int nextWidth = Math.Max(1, (int)(image.Width * 0.75));
+				int nextHeight = Math.Max(1, (int)(image.Height * 0.75));
+				image.Mutate(x => x.Resize(nextWidth, nextHeight));
+
+				byte[] scaledCandidate = await EncodeCandidateAsync(stepQuality);
+				if (scaledCandidate.Length <= maxBytes) {
+					return new MemoryStream(scaledCandidate);
+				}
+			}
+
+			// HEEEELP!!! HELP MEEEE!!! HEEEEEELP
+			return new MemoryStream(await EncodeCandidateAsync(minQuality));
+		}
+	}
+
+	public static byte[] InjectXmp(byte[] webpBytes, PhotoMetadata metadata, int width, int height, bool isTransparent = true) {
+		Metadata rseMetadata = new(metadata);
+		return ResoniteScreenshotExtensions.MetadataInjector.InjectXmp(
+			webpBytes,
+			RSE.ImageFormat.WEBP,
+			rseMetadata,
+			width,
+			height,
+			isTransparent
+		);
 	}
 }

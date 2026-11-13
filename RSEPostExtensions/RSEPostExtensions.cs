@@ -3,17 +3,10 @@ using System.Net.Http.Headers;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Web;
-
 using Elements.Core;
-
 using FrooxEngine;
-
 using HarmonyLib;
-
 using ResoniteModLoader;
-
-using static Elements.Core.FileUtil;
-using static FrooxEngine.OVRLipSyncInterface;
 
 using Metadata = ResoniteScreenshotExtensions.Metadata;
 using RSE = ResoniteScreenshotExtensions.ResoniteScreenshotExtensions;

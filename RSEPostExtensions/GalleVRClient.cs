@@ -1,13 +1,10 @@
-﻿using System.Net.Http.Headers;
+﻿using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Elements.Core;
 using FrooxEngine;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.Formats.Webp;
-using SixLabors.ImageSharp.Metadata.Profiles.Xmp;
-using SixLabors.ImageSharp.Processing;
 
 namespace RSEPostExtensions;
 
@@ -62,8 +59,6 @@ public class GalleVRClient {
 			return Convert.ToBase64String(Encoding.UTF8.GetBytes(json));
 		}
 	}
-
-	// Nested Objects
 
 	public record Player {
 		[JsonPropertyName("id")]
@@ -136,6 +131,139 @@ public class GalleVRClient {
 		}
 	}
 
+	public readonly record struct Tier(
+		string Name,
+		int MaxSize,
+		int MaxQuality,
+		long MaxBytes,
+		long MaxPixels
+	);
+
+	private static Tier GetTier(IEnumerable<string>? badges) {
+		var badgeSet = badges != null
+			? new HashSet<string>(badges, StringComparer.OrdinalIgnoreCase)
+			: [];
+
+		if (badgeSet.Contains("mega_supporter") || badgeSet.Contains("mega supporter")) {
+			return new Tier(
+				Name: "Mega Supporter",
+				MaxSize: 7680,     // 8K
+				MaxQuality: 95,
+				MaxBytes: 5242880,  // 5.0 MiB
+				MaxPixels: 33177600 // 7680x4320
+			);
+		}
+
+		if (badgeSet.Contains("super_supporter") || badgeSet.Contains("super supporter")) {
+			return new Tier(
+				Name: "Super Supporter",
+				MaxSize: 3840,    // 4K
+				MaxQuality: 92,
+				MaxBytes: 2621440, // 2.5 MiB
+				MaxPixels: 8294400 // 3840x2160
+			);
+		}
+
+		if (badgeSet.Contains("supporter")) {
+			return new Tier(
+				Name: "Supporter",
+				MaxSize: 2560,    // 2K
+				MaxQuality: 90,
+				MaxBytes: 1048576, // 1.0 MiB
+				MaxPixels: 3686400 // 2560x1440
+			);
+		}
+
+		return new Tier(
+			Name: "None",
+			MaxSize: 1920,    // 1080p
+			MaxQuality: 85,
+			MaxBytes: 153600,  // 150 KiB
+			MaxPixels: 2073600 // 1920x1080
+		);
+	}
+
+	private static readonly SemaphoreSlim _cacheLock = new(1, 1);
+
+	private static string? _cachedAccessKey;
+	private static IReadOnlyList<string>? _cachedBadges;
+
+	public static async Task<IReadOnlyList<string>?> GetBadgesAsync(string accessKey, bool forceRefresh = false, CancellationToken ct = default) {
+		if (string.IsNullOrWhiteSpace(accessKey))
+			return null;
+
+		if (!forceRefresh && _cachedBadges != null && _cachedAccessKey == accessKey) {
+			return _cachedBadges;
+		}
+
+		await _cacheLock.WaitAsync(ct).ConfigureAwait(false);
+		try {
+			if (!forceRefresh && _cachedBadges != null && _cachedAccessKey == accessKey) {
+				return _cachedBadges;
+			}
+
+			List<string>? fetched = await FetchBadgesFromApiAsync(accessKey, forceRefresh, ct).ConfigureAwait(false);
+			if (fetched != null) {
+				_cachedAccessKey = accessKey;
+				_cachedBadges = fetched;
+			}
+
+			return fetched ?? (_cachedAccessKey == accessKey ? _cachedBadges : null);
+		} finally {
+			_cacheLock.Release();
+		}
+	}
+
+	public static void ClearBadgeCache() {
+		_cachedAccessKey = null;
+		_cachedBadges = null;
+	}
+
+	private static async Task<List<string>?> FetchBadgesFromApiAsync(string accessKey, bool forceRefresh, CancellationToken ct) {
+		try {
+			string url = forceRefresh
+				? "https://api.gallevr.app/vrchat/auth/me?cache=false"
+				: "https://api.gallevr.app/vrchat/auth/me";
+
+			using (var request = new HttpRequestMessage(HttpMethod.Get, url)) {
+				request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessKey);
+				request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+				using HttpResponseMessage response = await _http
+					.SendAsync(request, ct)
+					.ConfigureAwait(false);
+
+				if (!response.IsSuccessStatusCode) {
+					string errorBody = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+					RSEPostExtensions.Warn($"Failed to fetch badges ({(int)response.StatusCode}): {errorBody}");
+					return null;
+				}
+
+				await using var responseStream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+				using JsonDocument doc = await JsonDocument.ParseAsync(responseStream, cancellationToken: ct).ConfigureAwait(false);
+
+				var badges = new List<string>();
+				if (doc.RootElement.TryGetProperty("badges", out JsonElement badgesElement) &&
+					badgesElement.ValueKind == JsonValueKind.Array) {
+					foreach (JsonElement item in badgesElement.EnumerateArray()) {
+						string? badge = item.ValueKind == JsonValueKind.String
+							? item.GetString()
+							: item.ToString();
+
+						if (!string.IsNullOrEmpty(badge))
+							badges.Add(badge);
+					}
+				}
+
+				RSEPostExtensions.Msg($"Cached badges for session: [{string.Join(", ", badges)}]");
+				return badges;
+			};
+		} catch (Exception ex) {
+			RSEPostExtensions.Error($"Error fetching user badges:\n{ex}");
+			return null;
+		}
+	}
+
 	public static async Task<string?> UploadFileAsync(
 		string userId,
 		string token,
@@ -158,53 +286,30 @@ public class GalleVRClient {
 		request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 		request.Headers.Add("metadata", metadata.ToBase64Header());
 
-		var fileStream = await CompressAndInjectXmpAsync(photo, localFilePath);
+		IReadOnlyList<string>? badges = await GetBadgesAsync(token);
+		Tier tier = GetTier(badges);
+		RSEPostExtensions.Msg($"Compressing GalleVR image with {tier.Name} tier capabilities ({tier.MaxBytes} target size/{tier.MaxSize} longest side/{tier.MaxQuality} quality/{tier.MaxPixels} max pixels)");
 
-		var fileContent = new StreamContent(fileStream);
-		fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+		double targetMiB = Math.Max(0, tier.MaxBytes - 4096) / (1024.0 * 1024.0); // subtracting a lil just in case
 
-		request.Content = fileContent;
+		using (System.IO.Stream fileStream = await Util.CompressImageAsync(
+			localFilePath,
+			targetMiB,
+			tier.MaxSize,
+			tier.MaxQuality,
+			tier.MaxPixels,
+			postProcess: (bytes, w, h) => Util.InjectXmp(bytes, photo, w, h)
+		)) {
+			StreamContent fileContent = new(fileStream);
+			fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
 
-		using var response = await _http.SendAsync(request);
-		await EnsureSuccessWithBodyAsync(response);
+			request.Content = fileContent;
 
-		return await response.Content.ReadAsStringAsync();
-	}
-
-	private static async Task<System.IO.Stream> CompressAndInjectXmpAsync(PhotoMetadata photo, string localFilePath) {
-		using var image = await Image.LoadAsync(localFilePath);
-
-		int width = image.Width;
-		int height = image.Height;
-		bool isTransparent = true;
-
-		if (width > 1920) {
-			image.Mutate(x => x.Resize(1920, 0));
-			width = image.Width;
-			height = image.Height;
-		}
-
-		using var compressedStream = new MemoryStream();
-		var encoder = new WebpEncoder {
-			FileFormat = WebpFileFormatType.Lossy,
-			Quality = 80 //TODO: If upload fails, try a few times with progressively higher compressions
+			using (HttpResponseMessage response = await _http.SendAsync(request)) {
+				await EnsureSuccessWithBodyAsync(response);
+				return await response.Content.ReadAsStringAsync();
+			};
 		};
-
-		await image.SaveAsync(compressedStream, encoder);
-		byte[] compressedBytes = compressedStream.ToArray();
-
-		var rseMetadata = new ResoniteScreenshotExtensions.Metadata(photo);
-
-		byte[] finalBytes = ResoniteScreenshotExtensions.MetadataInjector.InjectXmp(
-			compressedBytes,
-			ResoniteScreenshotExtensions.ResoniteScreenshotExtensions.ImageFormat.WEBP,
-			rseMetadata,
-			width,
-			height,
-			isTransparent
-		);
-
-		return new MemoryStream(finalBytes);
 	}
 
 	private static async Task EnsureSuccessWithBodyAsync(HttpResponseMessage response) {

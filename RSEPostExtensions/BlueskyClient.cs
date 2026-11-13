@@ -104,46 +104,36 @@ public partial class BlueskyClient {
 
 		return (await response.Content.ReadFromJsonAsync<SessionResponse>())!;
 	}
-	private static async Task<(byte[] Bytes, string MimeType)> EnsureImageSizeLimitAsync(string localFilePath, int maxBytes) {
-		string mimeType;
-		using (var fs = File.OpenRead(localFilePath)) {
-			(string mime, string ext) = Util.GuessImageMimeType(fs);
-			mimeType = mime;
+	private static async Task<(Stream stream, string mimeType)> EnsureImageSizeLimitAsync(string localFilePath, int maxBytes) {
+		var fileInfo = new FileInfo(localFilePath);
+
+		if (fileInfo.Length <= maxBytes) {
+			FileStream fs = File.OpenRead(localFilePath);
+			try {
+				(string mimeType, _) = Util.GuessImageMimeType(fs);
+				fs.Position = 0;
+				return (fs, mimeType);
+			} catch {
+				await fs.DisposeAsync();
+				throw;
+			}
 		}
 
-		byte[] imageBytes = await File.ReadAllBytesAsync(localFilePath);
+		double targetMiB = maxBytes / (1024.0 * 1024.0);
 
-		if (imageBytes.Length <= maxBytes) return (imageBytes, mimeType);
+		MemoryStream compressedStream = await Util.CompressImageAsync(
+			localFilePath,
+			targetMiB: targetMiB,
+			maxDimension: 2000
+		);
 
-		using var inStream = new MemoryStream(imageBytes);
-		using var image = await SixLabors.ImageSharp.Image.LoadAsync(inStream);
-
-		if (image.Width > 1920 || image.Height > 1920) {
-			image.Mutate(x => x.Resize(new SixLabors.ImageSharp.Processing.ResizeOptions {
-				Size = new SixLabors.ImageSharp.Size(1920, 1920),
-				Mode = SixLabors.ImageSharp.Processing.ResizeMode.Max
-			}));
-		}
-
-		using var ms = new MemoryStream();
-		int quality = 90;
-
-		do {
-			ms.SetLength(0);
-			var encoder = new SixLabors.ImageSharp.Formats.Webp.WebpEncoder {
-				FileFormat = SixLabors.ImageSharp.Formats.Webp.WebpFileFormatType.Lossy,
-				Quality = quality
-			};
-
-			await image.SaveAsync(ms, encoder);
-			quality -= 15;
-		} while (ms.Length > maxBytes && quality > 10);
-
-		if (ms.Length > maxBytes) {
+		if (compressedStream.Length > maxBytes) {
+			await compressedStream.DisposeAsync();
 			throw new InvalidOperationException($"Image is too complex to compress below {maxBytes / 1000000.0:0.##}MB.");
 		}
 
-		return (ms.ToArray(), "image/webp");
+		compressedStream.Position = 0;
+		return (compressedStream, "image/webp");
 	}
 
 	public static async Task<BlobData> UploadBlobAsync(Uri pdsUrl, string token, string localFilePath, int maxBytes) {
@@ -151,8 +141,8 @@ public partial class BlueskyClient {
 		using var request = new HttpRequestMessage(HttpMethod.Post, uploadEndpoint);
 		request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-		var (fileBytes, mimeType) = await EnsureImageSizeLimitAsync(localFilePath, maxBytes);
-		var content = new ByteArrayContent(fileBytes);
+		(Stream stream, string mimeType) = await EnsureImageSizeLimitAsync(localFilePath, maxBytes);
+		StreamContent content = new(stream);
 		content.Headers.ContentType = new MediaTypeHeaderValue(mimeType);
 		request.Content = content;
 
