@@ -52,6 +52,9 @@
       <HintPath>$(ResonitePath)FrooxEngine.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="FFMpegCore">
+      <HintPath>$(ResonitePath)FFMpegCore.dll</HintPath>
+    </Reference>
     <Reference Include="ResoniteScreenshotExtensions" Publicize="true">
       <HintPath>$(ResonitePath)/rml_mods/ResoniteScreenshotExtensions.dll</HintPath>
       <Private>False</Private>

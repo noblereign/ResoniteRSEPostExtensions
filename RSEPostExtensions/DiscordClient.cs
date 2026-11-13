@@ -1,5 +1,7 @@
 ﻿using System.Net.Http.Headers;
 using FrooxEngine;
+using Newtonsoft.Json;
+
 using ResoniteModLoader;
 using static ResoniteScreenshotExtensions.DiscordWebhookClient;
 using RSE = ResoniteScreenshotExtensions.ResoniteScreenshotExtensions;
@@ -11,15 +13,15 @@ public class DiscordClient {
 	// referenced from https://github.com/hantabaru1014/ResoniteScreenshotExtensions/blob/main/Patches/PhotoMetadataPatch.cs
 	private static readonly HttpClient _client = new();
 
-	public static async void PostVideoToDiscord(VideoMetadata metadata, string filePath, Uri webhookUrl) {
+	public static async Task<bool> PostVideoToDiscord(VideoMetadata metadata, string filePath, string altText, Uri webhookUrl) {
 		ModConfiguration? RSEConfig = ModLoader.Mods().FirstOrDefault(m => m.Name == "ResoniteScreenshotExtensions")?.GetConfiguration();
-		if (RSEConfig == null) return;
+		if (RSEConfig == null) return false;
 		ModConfigurationKey? DiscordWebhookEmbedLocationNameKey = RSEConfig?.ConfigurationItemDefinitions.FirstOrDefault(m => m.Name == "DiscordWebhookEmbedLocationName");
 		ModConfigurationKey? DiscordWebhookEmbedLocationHostKey = RSEConfig?.ConfigurationItemDefinitions.FirstOrDefault(m => m.Name == "DiscordWebhookEmbedLocationHost");
 		ModConfigurationKey? DiscordWebhookEmbedUsersKey = RSEConfig?.ConfigurationItemDefinitions.FirstOrDefault(m => m.Name == "DiscordWebhookEmbedUsers");
-		if (DiscordWebhookEmbedLocationHostKey == null) return;
-		if (DiscordWebhookEmbedLocationNameKey == null) return;
-		if (DiscordWebhookEmbedUsersKey == null) return;
+		if (DiscordWebhookEmbedLocationHostKey == null) return false;
+		if (DiscordWebhookEmbedLocationNameKey == null) return false;
+		if (DiscordWebhookEmbedUsersKey == null) return false;
 		
 
 		var fields = new List<EmbedField>();
@@ -41,34 +43,53 @@ public class DiscordClient {
 
 			fields.Add(new EmbedField("Users", string.Join(", ", usernames)));
 		}
-		
 
-		var json = $"{{\"embeds\": [{{\"fields\": [{fields.Select(f => f.ToJson()).Aggregate((acc, curr) => $"{acc}, {curr}")}]}}]}}";
+		if (altText.Length > 1024) altText = string.Concat(altText.AsSpan(0, 1021), "...");
 
-		_ = SendVideo(filePath, webhookUrl, json);
+		string escapedAltText = JsonConvert.ToString(altText);
+		string fieldsJson = string.Join(", ", fields.Select(f => f.ToJson()));
+
+		(string compressedVideoPath, bool autoDelete) = await Util.CompressVideoAsync(filePath);
+
+		try {
+			using (FileStream fileStream = File.OpenRead(compressedVideoPath)) {
+				(string mimeType, string extension) = Util.GuessVideoMimeType(fileStream);
+				string fileName = $"video{extension}";
+
+				string json = $"{{\"embeds\": [{{\"fields\": [{fieldsJson}]}}], \"attachments\": [{{\"id\": 0, \"filename\": \"{fileName}\", \"description\": {escapedAltText}}}]}}";
+
+				return await SendVideo(fileStream, mimeType, extension, webhookUrl, json);
+			}
+		} finally {
+			if (autoDelete && File.Exists(compressedVideoPath))
+			{
+				try { File.Delete(compressedVideoPath); } catch { }
+			}
+		}
 	}
 
-	private static async Task<bool> SendVideo(string srcPath, Uri webhookUrl, string? payloadJson = null) {
-		using (FileStream fileStream = File.OpenRead(srcPath)) {
-			FileInfo fileType = new(srcPath);
-			fileStream.Seek(0, SeekOrigin.Begin);
-			var fileContent = new StreamContent(fileStream);
-			fileContent.Headers.ContentType = new MediaTypeHeaderValue(Util.GuessVideoMimeType(fileStream));
-			fileContent.Headers.ContentDisposition = new ContentDispositionHeaderValue("attachment") {
-				FileName = $"video.{fileType.Extension}",
-			};
+	private static async Task<bool> SendVideo(FileStream fileStream, string mimeType, string extension, Uri webhookUrl, string? payloadJson = null) {
+		fileStream.Seek(0, SeekOrigin.Begin);
+		var fileContent = new StreamContent(fileStream);
+		fileContent.Headers.ContentType = new MediaTypeHeaderValue(mimeType);
+		fileContent.Headers.ContentDisposition = new ContentDispositionHeaderValue("form-data") {
+			Name = "files[0]",
+			FileName = $"video{extension}",
+		};
 
-			var request = new HttpRequestMessage(HttpMethod.Post, webhookUrl);
-			var form = new MultipartFormDataContent {
-				{ fileContent, "file" }
-			};
-			if (payloadJson != null) {
-				form.Add(new StringContent(payloadJson), "payload_json");
-			}
-			request.Content = form;
-
-			var response = await _client.SendAsync(request);
-			return response.IsSuccessStatusCode;
+		var request = new HttpRequestMessage(HttpMethod.Post, webhookUrl);
+		var form = new MultipartFormDataContent {
+			{ fileContent, "files[0]" }
+		};
+		if (payloadJson != null) {
+			form.Add(new StringContent(payloadJson), "payload_json");
 		}
+		request.Content = form;
+
+		var response = await _client.SendAsync(request);
+		if (!response.IsSuccessStatusCode) {
+			RSEPostExtensions.Warn($"Failed to post video to Discord: {response.StatusCode} {await response.Content.ReadAsStringAsync()}");
+		}
+		return response.IsSuccessStatusCode;
 	}
 }

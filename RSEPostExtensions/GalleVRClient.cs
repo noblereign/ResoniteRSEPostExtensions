@@ -187,7 +187,7 @@ public class GalleVRClient {
 		using var compressedStream = new MemoryStream();
 		var encoder = new WebpEncoder {
 			FileFormat = WebpFileFormatType.Lossy,
-			Quality = 80
+			Quality = 80 //TODO: If upload fails, try a few times with progressively higher compressions
 		};
 
 		await image.SaveAsync(compressedStream, encoder);

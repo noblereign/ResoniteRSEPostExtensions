@@ -100,7 +100,7 @@ public class MisskeyDriveClient {
 		var fileStream = File.OpenRead(localFilePath);
 		var fileContent = new StreamContent(fileStream);
 
-		string mimeType = Util.GuessImageMimeType(fileStream);
+		(string mimeType, string ext) = Util.GuessImageMimeType(fileStream);
 		fileStream.Position = 0;
 
 		fileContent.Headers.ContentType = new MediaTypeHeaderValue(mimeType);

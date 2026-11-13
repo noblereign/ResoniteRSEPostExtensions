@@ -1,11 +1,20 @@
 ﻿using System.Collections.Concurrent;
+using System.Net.Http.Headers;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Web;
+
 using Elements.Core;
+
 using FrooxEngine;
+
 using HarmonyLib;
+
 using ResoniteModLoader;
+
+using static Elements.Core.FileUtil;
+using static FrooxEngine.OVRLipSyncInterface;
+
 using Metadata = ResoniteScreenshotExtensions.Metadata;
 using RSE = ResoniteScreenshotExtensions.ResoniteScreenshotExtensions;
 
@@ -74,7 +83,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 	const string MENU_ITEM_TAG = "RSE_POST_TO_DISCORD";
 
-	private static readonly ConcurrentDictionary<string, Uri> _urlMappings = new();
+	private static readonly ConcurrentDictionary<string, (Uri, CameraMediaMetadataBase)> _urlMappings = new();
 	private static readonly ConcurrentDictionary<string, string> _misskeyFolderCache = new();
 
 	private static readonly BlueskySessionManager bskyManager = new();
@@ -126,12 +135,21 @@ public partial class RSEPostExtensions : ResoniteMod {
 			var targetPostfix = SymbolExtensions.GetMethodInfo(() =>
 				RSE.PhotoMetadata_Patch.GenerateMenuItems_Postfix(null!, null!)
 			);
+			Harmony harmony = new(harmonyId);
 
 			if (targetPostfix != null) {
-				Harmony harmony = new(harmonyId);
 				var myPrefix = new HarmonyMethod(typeof(RSEPostExtensions), nameof(RSEPostExtensions.ContextMenuHook));
-
 				harmony.Patch(targetPostfix, prefix: myPrefix);
+			}
+
+			var sendImageTarget = AccessTools.Method(
+				typeof(ResoniteScreenshotExtensions.DiscordWebhookClient),
+				nameof(ResoniteScreenshotExtensions.DiscordWebhookClient.SendImageWithMetadata)
+			);
+
+			if (sendImageTarget != null) {
+				var sendImagePrefix = new HarmonyMethod(typeof(RSEPostExtensions), nameof(RSEPostExtensions.SendImageHook));
+				harmony.Patch(sendImageTarget, prefix: sendImagePrefix);
 			}
 		} catch (Exception ex) {
 			Warn($"Failed to patch ResoniteScreenshotExtensions: {ex}");
@@ -159,7 +177,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 			bool isConfirming = false;
 
-			menuItem.Button.LocalPressed += (button, eventData) => {
+			menuItem.Button.LocalPressed += async (button, eventData) => {
 				if (!menuItem.Button.Enabled) return;
 
 				if (Config!.GetValue(DoubleClickConfirm) && !isConfirming) {
@@ -177,10 +195,20 @@ public partial class RSEPostExtensions : ResoniteMod {
 					return;
 				}
 				menuItem.Button.Enabled = false;
-				menuItem.Label.Target.Value = $"<i>Sent to {webhookName}";
-				
-
-				PostToDiscord(metadata, new Uri(baseUrl));
+				menuItem.Label.Target.Value = $"<i>Compressing...";
+				bool posted = await PostToDiscord(metadata, new Uri(baseUrl));
+				if (menuItem != null && !menuItem.IsDisposed && !menuItem.IsDestroyed && !menuItem.IsRemoved && menuItem.IsValid) {
+					menuItem.RunSynchronously(() => {
+						if (posted) {
+							menuItem.Label.Target.Value = $"<i>Sent to {webhookName}";
+						} else {
+							menuItem.Label.Target.Value = $"<color=hero.red>Post Failed</color>\n<size=60%><color=#bcbcbc>Click to try again</color></size>";
+							menuItem.Color.Value = RadiantUI_Constants.Hero.RED;
+						}
+					});
+				} else {
+					NotificationMessage.SpawnTextMessage("Video was posted to Discord", RadiantUI_Constants.Hero.GREEN, 0.3f, 2.5f);
+				}
 			};
 		}
 	}
@@ -239,7 +267,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 		return template;
 	}
 
-	static async Task<string> AltTextFromMetadata(CameraMediaMetadataBase metadata) {
+	private static async Task<string> AltTextFromMetadata(CameraMediaMetadataBase metadata) {
 		Slot? extendedTagSlot = metadata.Slot.FindChild("PhotoMetadata_Tags");
 
 		string photographerName = await Util.GetUsernameFromUserId(metadata.TakenBy._userId, metadata.World);
@@ -617,7 +645,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 		} catch (Exception ex) {
 			Warn($"Misskey upload failed: {ex.Message}");
 
-			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to Misskey!", colorX.Red, 0.7f, 5f);
+			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to Misskey!", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
 
 			return (null, null);
 		}
@@ -833,7 +861,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 		} catch (Exception ex) {
 			Warn($"GalleVR upload failed: {ex.Message}");
 
-			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to GalleVR!", colorX.Red, 0.7f, 5f);
+			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to GalleVR!", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
 
 			return null;
 		}
@@ -950,14 +978,14 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 		try {
 			if (string.IsNullOrWhiteSpace(handle) || string.IsNullOrWhiteSpace(password)) {
-				NotificationMessage.SpawnTextMessage("[RSEPostExtensions] No app password specified!", colorX.Red, 0.7f, 5f);
+				NotificationMessage.SpawnTextMessage("[RSEPostExtensions] No app password specified!", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
 				return (null, null);
 			}
 
 			await bskyManager.LoginAsync(handle, password);
 		} catch (Exception ex) {
 			Warn($"Failed to login to Bluesky: {ex.Message}");
-			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Bluesky Login Failed!", colorX.Red, 0.7f, 5f);
+			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Bluesky Login Failed!", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
 			return (null, null);
 		}
 
@@ -1008,7 +1036,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 			string notifMsg = ex is InvalidOperationException
 				? $"[RSEPostExtensions] {ex.Message}"
 				: "[RSEPostExtensions] Failed to post to Bluesky!";
-			NotificationMessage.SpawnTextMessage(notifMsg, colorX.Red, 0.7f, 5f);
+			NotificationMessage.SpawnTextMessage(notifMsg, RadiantUI_Constants.Hero.RED, 0.7f, 5f);
 			return (null, null);
 		}
 	}
@@ -1038,17 +1066,70 @@ public partial class RSEPostExtensions : ResoniteMod {
 		return false;
 	}
 
-	static void PostToDiscord(CameraMediaMetadataBase metadata, Uri webhookUri) {
+
+	public static bool SendImageHook(object __instance, string srcPath, IEnumerable<ResoniteScreenshotExtensions.DiscordWebhookClient.EmbedField> fields, ref Task<bool> __result) {
+		string webhookUrl = Traverse.Create(__instance).Field("_webhookUrl").GetValue<string>();
+		HttpClient client = Traverse.Create(__instance).Field("_client").GetValue<HttpClient>();
+
+		if (_urlMappings.TryGetValue(srcPath, out (Uri webhookUri, CameraMediaMetadataBase metadata) mapping)) {
+			__result = InjectAltText(mapping.metadata, srcPath, fields, webhookUrl, client);
+			return false;
+		}
+		return true;
+	}
+
+	private static async Task<bool> InjectAltText(CameraMediaMetadataBase metadata, string srcPath, IEnumerable<ResoniteScreenshotExtensions.DiscordWebhookClient.EmbedField> fields, string webhookUrl, HttpClient client) {
+		string altText = await AltTextFromMetadata(metadata);
+		if (altText.Length > 1024) altText = string.Concat(altText.AsSpan(0, 1021), "...");
+
+		string escapedAltText = Newtonsoft.Json.JsonConvert.ToString(altText);
+
+		using (var fileStream = File.OpenRead(srcPath)) {
+			(string mimeType, string extension) = Util.GuessImageMimeType(fileStream);
+			string fileName = $"image{extension}";
+
+			string fieldsJson = string.Join(", ", fields.Select(f => f.ToJson()));
+			string json = $"{{\"embeds\": [{{\"fields\": [{fieldsJson}]}}], \"attachments\": [{{\"id\": 0, \"filename\": \"{fileName}\", \"description\": {escapedAltText}}}]}}";
+
+			return await PostToDiscordWithAltText(json, fileStream, mimeType, extension, webhookUrl, client);
+		}
+	}
+
+	private static async Task<bool> PostToDiscordWithAltText(string payloadJson, FileStream fileStream, string mimeType, string extension, string webhookUrl, HttpClient client) {
+		fileStream.Seek(0, SeekOrigin.Begin);
+
+		var fileContent = new StreamContent(fileStream);
+		fileContent.Headers.ContentType = new MediaTypeHeaderValue(mimeType);
+		fileContent.Headers.ContentDisposition = new ContentDispositionHeaderValue("form-data") {
+			Name = "files[0]",
+			FileName = $"image{extension}",
+		};
+
+		var request = new HttpRequestMessage(HttpMethod.Post, webhookUrl);
+		var form = new MultipartFormDataContent
+		{
+			{ fileContent, "files[0]" },
+			{ new System.Net.Http.StringContent(payloadJson), "payload_json" }
+		};
+		request.Content = form;
+
+		var response = await client.SendAsync(request);
+		if (!response.IsSuccessStatusCode) {
+			Warn($"Failed to post image to Discord: {response.StatusCode} {await response.Content.ReadAsStringAsync()}");
+			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post video to Discord, check log", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
+		}
+		return response.IsSuccessStatusCode;
+	}
+
+	static async Task<bool> PostToDiscord(CameraMediaMetadataBase metadata, Uri webhookUri) {
 		if (!Config!.GetValue(Multiposting)) {
 			metadata.LocalUser.CloseContextMenu(null!);
 		}
 		Msg("Posting to Discord...");
 
-		metadata.StartGlobalTask(async () =>
-		{
+		bool posted = await metadata.StartGlobalTask(async Task<bool> () => {
 			switch (metadata) {
-				case PhotoMetadata metadata: 
-					{
+				case PhotoMetadata metadata: {
 						StaticTexture2D? tex = metadata.Slot.GetComponent<StaticTexture2D>();
 						Uri? url = tex?.URL.Value;
 
@@ -1059,9 +1140,9 @@ public partial class RSEPostExtensions : ResoniteMod {
 						if (tmpPath is null) break;
 
 						Msg("Posting to Discord as photo");
-						_urlMappings[tmpPath] = webhookUri;
+						_urlMappings[tmpPath] = (webhookUri, metadata);
 						RSE.PhotoMetadata_Patch.PostToDiscord(new Metadata(metadata), tmpPath);
-						break; 
+						return true;
 					}
 				case VideoMetadata metadata: //RSE doesn't support videos, we'll have to handle it ourselves
 					{
@@ -1074,16 +1155,33 @@ public partial class RSEPostExtensions : ResoniteMod {
 						string? tmpPath = await metadata.Engine.AssetManager.GatherAssetFile(url, 100f);
 						if (tmpPath is null) break;
 
+						string altText = await AltTextFromMetadata(metadata);
+
 						Msg("Posting to Discord as video");
-						DiscordClient.PostVideoToDiscord(metadata, tmpPath, webhookUri);
-						break;
+						bool posted = await DiscordClient.PostVideoToDiscord(metadata, tmpPath, altText, webhookUri).ContinueWith(bool (t) =>  {
+							if (t.IsFaulted) {
+								Warn($"Error occurred whilst posting video to Discord!! {t.Exception}");
+								NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Error posting video to Discord, check log!!", colorX.Red, 0.7f, 5f); // making it redder because it means something blew up extra bad
+								return false;
+							} else {
+								if (!t.Result) {
+									Warn($"Failed to post video to Discord");
+									NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post video to Discord, check log", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
+									return false;
+								}
+							}
+							return true;
+						});
+						return posted;
 					}
 				default:
 					Msg("Posting to Discord as.. um.. what kind of file is this");
-					NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Media type currently unsupported :(", colorX.Red, 0.7f, 5f);
-					break;
+					NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Media type currently unsupported :(", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
+					return false;
 			}
+			return false;
 		});
+		return posted;
 	}
 
 	[HarmonyPatch(typeof(RSE.PhotoMetadata_Patch), "PostToDiscord")]
@@ -1107,11 +1205,11 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 		public static string? CustomConfigInterceptor(ModConfiguration configInstance, ModConfigurationKey<string> key, string filePath) {
 			if (Config!.GetValue(Enabled) && key == RSE.DiscordWebhookUrlKey) {
-				if (_urlMappings.TryGetValue(filePath, out Uri? webhookUri)) {
-					return webhookUri.ToString();
+				if (_urlMappings.TryGetValue(filePath, out (Uri webhookUri, CameraMediaMetadataBase metadata) mapping)) {
+					return mapping.webhookUri.ToString();
 				}
 				Warn("Couldn't find webhook URI mapping!! ABORT!!!");
-				NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to Discord, please try again!", colorX.Red, 0.7f, 5f);
+				NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to Discord, please try again!", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
 				return "";
 			}
 			return configInstance.GetValue(key);

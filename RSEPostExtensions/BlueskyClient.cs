@@ -107,7 +107,8 @@ public partial class BlueskyClient {
 	private static async Task<(byte[] Bytes, string MimeType)> EnsureImageSizeLimitAsync(string localFilePath, int maxBytes) {
 		string mimeType;
 		using (var fs = File.OpenRead(localFilePath)) {
-			mimeType = Util.GuessImageMimeType(fs);
+			(string mime, string ext) = Util.GuessImageMimeType(fs);
+			mimeType = mime;
 		}
 
 		byte[] imageBytes = await File.ReadAllBytesAsync(localFilePath);
