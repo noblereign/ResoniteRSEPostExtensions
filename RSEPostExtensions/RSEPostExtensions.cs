@@ -17,7 +17,7 @@ using ResoniteHotReloadLib;
 namespace RSEPostExtensions;
 
 public class RSEPostExtensions : ResoniteMod {
-	internal const string VERSION_CONSTANT = "4.0.0"; //Changing the version here updates it in all locations needed
+	internal const string VERSION_CONSTANT = "4.0.1"; //Changing the version here updates it in all locations needed
 	public override string Name => "RSEPostExtensions";
 	public override string Author => "Noble";
 	public override string Version => VERSION_CONSTANT;
@@ -122,15 +122,19 @@ public class RSEPostExtensions : ResoniteMod {
 
 
 	public static void PatchRSE() {
-		var targetPostfix = SymbolExtensions.GetMethodInfo(() =>
-			RSE.PhotoMetadata_Patch.GenerateMenuItems_Postfix(null!, null!)
-		);
+		try {
+			var targetPostfix = SymbolExtensions.GetMethodInfo(() =>
+				RSE.PhotoMetadata_Patch.GenerateMenuItems_Postfix(null!, null!)
+			);
 
-		if (targetPostfix != null) {
-			Harmony harmony = new Harmony(harmonyId);
-			var myPrefix = new HarmonyMethod(typeof(RSEPostExtensions), nameof(RSEPostExtensions.ContextMenuHook));
+			if (targetPostfix != null) {
+				Harmony harmony = new Harmony(harmonyId);
+				var myPrefix = new HarmonyMethod(typeof(RSEPostExtensions), nameof(RSEPostExtensions.ContextMenuHook));
 
-			harmony.Patch(targetPostfix, prefix: myPrefix);
+				harmony.Patch(targetPostfix, prefix: myPrefix);
+			}
+		} catch (Exception ex) {
+			Warn($"Failed to patch ResoniteScreenshotExtensions: {ex}");
 		}
 	}
 
