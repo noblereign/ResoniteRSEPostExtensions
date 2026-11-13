@@ -1056,8 +1056,10 @@ public partial class RSEPostExtensions : ResoniteMod {
 			_urlMappings[tmpPath] = webhookUri;
 			if (metadata is PhotoMetadata photometa) {
 				RSE.PhotoMetadata_Patch.PostToDiscord(new Metadata(photometa), tmpPath);
-			} else { //RSE doesn't support videos, we'll have to handle it ourselves
-
+			} else if (metadata is VideoMetadata videometa) { //RSE doesn't support videos, we'll have to handle it ourselves
+				DiscordClient.PostVideoToDiscord(videometa, tmpPath, webhookUri);
+			} else {
+				NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Media type currently unsupported :(", colorX.Red, 0.7f, 5f);
 			}
 		});
 	}
