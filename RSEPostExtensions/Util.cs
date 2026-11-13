@@ -441,6 +441,7 @@ internal class Util {
 				int newWidth = Math.Max(1, (int)Math.Round(image.Width * scale));
 				int newHeight = Math.Max(1, (int)Math.Round(image.Height * scale));
 				image.Mutate(x => x.Resize(newWidth, newHeight));
+				RSEPostExtensions.Msg($"Max dimension enforced: {longestSide} --> {Math.Max(newWidth, newHeight)}");
 			}
 
 			// max pixels
@@ -450,71 +451,79 @@ internal class Util {
 				int newWidth = Math.Max(1, (int)Math.Floor(image.Width * areaScale));
 				int newHeight = Math.Max(1, (int)Math.Floor(image.Height * areaScale));
 				image.Mutate(x => x.Resize(newWidth, newHeight));
+				RSEPostExtensions.Msg($"Max pixels enforced: {currentPixels} --> {maxPixels}");
 			}
 
-			using var compressedStream = new MemoryStream();
+			using (MemoryStream compressedStream = new()) {
+				async Task<byte[]> EncodeCandidateAsync(int quality) {
+					compressedStream.SetLength(0);
+					compressedStream.Position = 0;
 
-			async Task<byte[]> EncodeCandidateAsync(int quality) {
-				compressedStream.SetLength(0);
-				compressedStream.Position = 0;
+					var encoder = new WebpEncoder {
+						FileFormat = WebpFileFormatType.Lossy,
+						Quality = quality
+					};
 
-				var encoder = new WebpEncoder {
-					FileFormat = WebpFileFormatType.Lossy,
-					Quality = quality
-				};
+					await image.SaveAsync(compressedStream, encoder);
+					byte[] rawBytes = compressedStream.ToArray();
 
-				await image.SaveAsync(compressedStream, encoder);
-				byte[] rawBytes = compressedStream.ToArray();
-
-				return postProcess != null
-					? postProcess(rawBytes, image.Width, image.Height)
-					: rawBytes;
-			}
-
-			// webp quality
-			int initialQuality = Math.Clamp(webpQuality, 0, 100);
-			byte[] bestBytes = await EncodeCandidateAsync(initialQuality);
-			if (bestBytes.Length <= maxBytes) {
-				return new MemoryStream(bestBytes);
-			}
-
-			// still too big so thanos method until it isnt
-			const int minQuality = 20;
-			int low = minQuality;
-			int high = initialQuality - 1;
-			byte[]? validFit = null;
-
-			while (low <= high) {
-				int mid = (low + high) / 2;
-				byte[] candidate = await EncodeCandidateAsync(mid);
-
-				if (candidate.Length <= maxBytes) {
-					validFit = candidate;
-					low = mid + 1;
-				} else {
-					high = mid - 1;
+					return postProcess != null
+						? postProcess(rawBytes, image.Width, image.Height)
+						: rawBytes;
 				}
-			}
 
-			if (validFit != null) {
-				return new MemoryStream(validFit);
-			}
-
-			// dear god we're cooked, make it tinier?????
-			int stepQuality = Math.Min(45, initialQuality);
-			while (Math.Max(image.Width, image.Height) > 480) {
-				int nextWidth = Math.Max(1, (int)(image.Width * 0.75));
-				int nextHeight = Math.Max(1, (int)(image.Height * 0.75));
-				image.Mutate(x => x.Resize(nextWidth, nextHeight));
-
-				byte[] scaledCandidate = await EncodeCandidateAsync(stepQuality);
-				if (scaledCandidate.Length <= maxBytes) {
-					return new MemoryStream(scaledCandidate);
+				// webp quality
+				int initialQuality = Math.Clamp(webpQuality, 0, 100);
+				byte[] bestBytes = await EncodeCandidateAsync(initialQuality);
+				if (bestBytes.Length <= maxBytes) {
+					RSEPostExtensions.Msg($"Completing with requested quality: {webpQuality}");
+					return new MemoryStream(bestBytes);
 				}
-			}
 
-			// HEEEELP!!! HELP MEEEE!!! HEEEEEELP
-			return new MemoryStream(await EncodeCandidateAsync(minQuality));
+				// still too big so thanos method until it isnt
+				const int minQuality = 20;
+				int low = minQuality;
+				int high = initialQuality - 1;
+				byte[]? validFit = null;
+
+				while (low <= high) {
+					int mid = (low + high) / 2;
+					byte[] candidate = await EncodeCandidateAsync(mid);
+
+					if (candidate.Length <= maxBytes) {
+						validFit = candidate;
+						low = mid + 1;
+					} else {
+						high = mid - 1;
+					}
+				}
+
+				if (validFit != null) {
+					RSEPostExtensions.Msg($"Completing with reduced quality: {initialQuality} --> {low - 1}");
+					return new MemoryStream(validFit);
+				}
+
+				// dear god we're cooked, make it tinier?????
+				int initialWidth = image.Width;
+				int initialHeight = image.Height;
+
+				int stepQuality = Math.Min(45, initialQuality);
+				while (Math.Max(image.Width, image.Height) > 480) {
+					int nextWidth = Math.Max(1, (int)(image.Width * 0.75));
+					int nextHeight = Math.Max(1, (int)(image.Height * 0.75));
+					image.Mutate(x => x.Resize(nextWidth, nextHeight));
+
+					byte[] scaledCandidate = await EncodeCandidateAsync(stepQuality);
+					if (scaledCandidate.Length <= maxBytes) {
+						RSEPostExtensions.Msg($"Completing with reduced quality and resolution. R: {initialWidth}x{initialHeight} --> {nextWidth}x{nextHeight} Q: {initialQuality} --> {stepQuality}");
+						return new MemoryStream(scaledCandidate);
+					}
+				}
+
+				// HEEEELP!!! HELP MEEEE!!! HEEEEEELP
+				RSEPostExtensions.Warn($"Completing with a minimum quality image, this still might not be enough to fit within {maxBytes} bytes!!!");
+				return new MemoryStream(await EncodeCandidateAsync(minQuality));
+			}
 		}
 	}
 
