@@ -237,54 +237,6 @@ internal class Util {
 		OpenH264
 	}
 
-	public static async Task<(string outputPath, bool wasCompressed)> CompressVideoAsync(string inputPath, double targetMiB = 19, int audioKbps = 96, CancellationToken ct = default) {
-		long maxBytes = (long)(targetMiB * 1024 * 1024);
-		var inputInfo = new FileInfo(inputPath);
-
-		if (inputInfo.Length <= maxBytes) {
-			return (inputPath, false);
-		}
-
-		IMediaAnalysis mediaInfo = await FFProbe.AnalyseAsync(inputPath, cancellationToken: ct).ConfigureAwait(false);
-		double durationSeconds = mediaInfo.Duration.TotalSeconds;
-
-		if (durationSeconds <= 0.1)
-			throw new InvalidOperationException("Invalid video duration");
-
-		EncoderChoice encoder = SelectBestEncoder();
-		RSEPostExtensions.Msg($"Determined best encoder is {encoder}");
-
-		double containerFactor = encoder == EncoderChoice.X264TwoPass ? 0.94 : 0.90;
-		double totalKbits = targetMiB * 8192.0 * containerFactor;
-		int videoKbps = (int)(totalKbits / durationSeconds) - audioKbps;
-
-		if (videoKbps < 150)
-			throw new InvalidOperationException($"{durationSeconds:F1}s video is too long to fit within {targetMiB} MiB");
-
-		int? targetHeight = videoKbps switch {
-			< 600 => 480,
-			< 1400 => 720,
-			_ => null
-		};
-
-		string tempOutputPath = Path.Combine(Path.GetTempPath(), $"RSEPostExtensions_compressed_{Guid.NewGuid():N}.mp4");
-
-		try {
-			if (encoder == EncoderChoice.X264TwoPass) {
-				await EncodeTwoPassX264Async(inputPath, tempOutputPath, videoKbps, audioKbps, targetHeight, ct).ConfigureAwait(false);
-			} else {
-				await EncodeSinglePassAsync(inputPath, tempOutputPath, encoder, videoKbps, audioKbps, targetHeight, ct).ConfigureAwait(false);
-			}
-
-			return (tempOutputPath, true);
-		} catch {
-			if (File.Exists(tempOutputPath)) {
-				try { File.Delete(tempOutputPath); } catch { }
-			}
-			throw;
-		}
-	}
-
 	private static EncoderChoice SelectBestEncoder() {
 		string gpu = Engine.Current.SystemInfo.GPU;
 
@@ -305,34 +257,117 @@ internal class Util {
 			string.Equals(c.Name, codecName, StringComparison.OrdinalIgnoreCase));
 	}
 
-	private static async Task EncodeSinglePassAsync(string inputPath, string outputPath, EncoderChoice encoder, int videoKbps, int audioKbps, int? targetHeight, CancellationToken ct) {
-		if (encoder == EncoderChoice.Nvenc) {
+	public static async Task<(string outputPath, bool wasCompressed)> CompressVideoAsync(
+	string inputPath,
+	double targetMiB = 19,
+	int audioKbps = 96,
+	bool fixColorRange = true,
+	CancellationToken ct = default) {
+		long maxBytes = (long)(targetMiB * 1024 * 1024);
+		var inputInfo = new FileInfo(inputPath);
+
+		if (!fixColorRange && inputInfo.Length <= maxBytes) {
+			return (inputPath, false);
+		}
+
+		IMediaAnalysis mediaInfo = await FFProbe.AnalyseAsync(inputPath, cancellationToken: ct).ConfigureAwait(false);
+		double durationSeconds = mediaInfo.Duration.TotalSeconds;
+
+		if (durationSeconds <= 0.1)
+			throw new InvalidOperationException("Invalid video duration");
+
+		EncoderChoice encoder = SelectBestEncoder();
+		RSEPostExtensions.Msg($"Determined best encoder is {encoder}");
+
+		double containerFactor = encoder == EncoderChoice.X264TwoPass ? 0.94 : 0.90;
+		double totalKbits = targetMiB * 8192.0 * containerFactor;
+		int videoKbps = (int)(totalKbits / durationSeconds) - audioKbps;
+
+		if (videoKbps < 150)
+			throw new InvalidOperationException($"{durationSeconds:F1}s video is too long to fit within {targetMiB} MiB");
+
+		long sourceBitRate = mediaInfo.PrimaryVideoStream?.BitRate ?? 0;
+		if (sourceBitRate > 0) {
+			int sourceKbps = (int)(sourceBitRate / 1000);
+			if (sourceKbps > 150) {
+				videoKbps = Math.Min(videoKbps, sourceKbps);
+			}
+		}
+
+		int? targetHeight = videoKbps switch {
+			< 600 => 480,
+			< 1400 => 720,
+			_ => null
+		};
+
+		string tempOutputPath = Path.Combine(Path.GetTempPath(), $"RSEPostExtensions_compressed_{Guid.NewGuid():N}.mp4");
+
+		try {
+			if (encoder == EncoderChoice.X264TwoPass) {
+				await EncodeTwoPassX264Async(inputPath, tempOutputPath, videoKbps, audioKbps, targetHeight, fixColorRange, ct).ConfigureAwait(false);
+			} else {
+				await EncodeSinglePassAsync(inputPath, tempOutputPath, encoder, videoKbps, audioKbps, targetHeight, fixColorRange, ct).ConfigureAwait(false);
+			}
+
+			return (tempOutputPath, true);
+		} catch {
+			if (File.Exists(tempOutputPath)) {
+				try { File.Delete(tempOutputPath); } catch { }
+			}
+			throw;
+		}
+	}
+
+	private static async Task EncodeSinglePassAsync(
+		string inputPath,
+		string outputPath,
+		EncoderChoice encoder,
+		int videoKbps,
+		int audioKbps,
+		int? targetHeight,
+		bool fixColorRange,
+		CancellationToken ct) {
+		if (encoder == EncoderChoice.Nvenc && !fixColorRange) {
 			try {
 				await EncodeNvencFullCudaAsync(inputPath, outputPath, videoKbps, audioKbps, targetHeight, ct).ConfigureAwait(false);
 				return;
-			} catch (Exception e) { RSEPostExtensions.Warn($"Full CUDA compression had an exception, falling back to partial NVENC compression: {e.Message}");  }
+			} catch (Exception e) {
+				RSEPostExtensions.Warn($"Full CUDA compression had an exception, falling back to partial NVENC compression: {e.Message}");
+			}
 		}
 
-		string scaleArg = targetHeight.HasValue ? $"-vf \"scale=-2:{targetHeight.Value}\"" : string.Empty;
+		string vfFilter = (targetHeight.HasValue, fixColorRange) switch {
+			(true, true) => $"scale=-2:{targetHeight!.Value}:in_range=full:out_range=tv,format=yuv420p",
+			(true, false) => $"scale=-2:{targetHeight!.Value},format=yuv420p",
+			(false, true) => "scale=in_range=full:out_range=tv,format=yuv420p",
+			(false, false) => string.Empty
+		};
 
 		await FFMpegArguments
-			.FromFileInput(inputPath, verifyExists: true, options =>
-			{
+			.FromFileInput(inputPath, verifyExists: true, options => {
 				if (encoder == EncoderChoice.Nvenc)
 					options.WithCustomArgument("-hwaccel cuda");
 			})
 			.OutputToFile(outputPath, overwrite: true, options => {
 				switch (encoder) {
 					case EncoderChoice.Nvenc:
-						options.WithVideoCodec("h264_nvenc").WithCustomArgument("-pix_fmt yuv420p");
+						options.WithVideoCodec("h264_nvenc");
 						break;
 					case EncoderChoice.Amf:
-						options.WithVideoCodec("h264_amf").WithCustomArgument("-pix_fmt yuv420p");
+						options.WithVideoCodec("h264_amf");
 						break;
 					default:
-						options.WithVideoCodec("libopenh264").WithCustomArgument("-pix_fmt yuv420p");
+						options.WithVideoCodec("libopenh264");
 						break;
 				}
+
+				if (string.IsNullOrEmpty(vfFilter))
+					options.WithCustomArgument("-pix_fmt yuv420p");
+				else
+					options.WithCustomArgument($"-vf \"{vfFilter}\"");
+
+				if (fixColorRange)
+					options.WithCustomArgument("-color_range tv -colorspace bt709 -color_primaries bt709 -color_trc bt709");
 
 				options
 					.WithVideoBitrate(videoKbps)
@@ -340,13 +375,74 @@ internal class Util {
 					.WithAudioBitrate(audioKbps)
 					.WithFastStart()
 					.WithCustomArgument($"-threads 2 -maxrate {(int)(videoKbps * 1.15)}k -bufsize {videoKbps * 2}k");
-
-				if (!string.IsNullOrEmpty(scaleArg))
-					options.WithCustomArgument(scaleArg);
 			})
 			.CancellableThrough(ct)
 			.ProcessAsynchronously()
 			.ConfigureAwait(false);
+	}
+
+	private static async Task EncodeTwoPassX264Async(
+		string inputPath,
+		string outputPath,
+		int videoKbps,
+		int audioKbps,
+		int? targetHeight,
+		bool fixColorRange,
+		CancellationToken ct) {
+		string passLogPrefix = Path.Combine(Path.GetTempPath(), $"RSEPostExtensions_x264_{Guid.NewGuid():N}");
+		string nullTarget = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "NUL" : "/dev/null"; // hopefully works on linux?? no clue about the like 3 mac users
+
+		string vfFilter = (targetHeight.HasValue, fixColorRange) switch {
+			(true, true) => $"scale=-2:{targetHeight!.Value}:in_range=full:out_range=tv,format=yuv420p",
+			(true, false) => $"scale=-2:{targetHeight!.Value},format=yuv420p",
+			(false, true) => "scale=in_range=full:out_range=tv,format=yuv420p",
+			(false, false) => string.Empty
+		};
+
+		try {
+			await FFMpegArguments
+				.FromFileInput(inputPath)
+				.OutputToUrl(nullTarget, options => {
+					options
+						.WithVideoCodec("libx264")
+						.WithSpeedPreset(Speed.Medium)
+						.WithVideoBitrate(videoKbps)
+						.ForceFormat("mp4")
+						.WithCustomArgument($"-an -pass 1 -passlogfile \"{passLogPrefix}\"");
+
+					if (!string.IsNullOrEmpty(vfFilter))
+						options.WithCustomArgument($"-vf \"{vfFilter}\"");
+				})
+				.CancellableThrough(ct)
+				.ProcessAsynchronously()
+				.ConfigureAwait(false);
+
+			await FFMpegArguments
+				.FromFileInput(inputPath)
+				.OutputToFile(outputPath, overwrite: true, options => {
+					options
+						.WithVideoCodec("libx264")
+						.WithSpeedPreset(Speed.Medium)
+						.WithVideoBitrate(videoKbps)
+						.WithAudioCodec("aac")
+						.WithAudioBitrate(audioKbps)
+						.WithFastStart()
+						.WithCustomArgument($"-maxrate {(int)(videoKbps * 1.2)}k -bufsize {videoKbps * 2}k -pass 2 -passlogfile \"{passLogPrefix}\"");
+
+					if (string.IsNullOrEmpty(vfFilter))
+						options.WithCustomArgument("-pix_fmt yuv420p");
+					else
+						options.WithCustomArgument($"-vf \"{vfFilter}\"");
+
+					if (fixColorRange)
+						options.WithCustomArgument("-color_range tv -colorspace bt709 -color_primaries bt709 -color_trc bt709");
+				})
+				.CancellableThrough(ct)
+				.ProcessAsynchronously()
+				.ConfigureAwait(false);
+		} finally {
+			CleanupPassLogs(passLogPrefix);
+		}
 	}
 
 	private static async Task EncodeNvencFullCudaAsync(string inputPath, string outputPath, int videoKbps, int audioKbps, int? targetHeight, CancellationToken ct) {
@@ -370,52 +466,6 @@ internal class Util {
 			.CancellableThrough(ct)
 			.ProcessAsynchronously()
 			.ConfigureAwait(false);
-	}
-
-	private static async Task EncodeTwoPassX264Async(string inputPath, string outputPath, int videoKbps, int audioKbps, int? targetHeight, CancellationToken ct) {
-		string passLogPrefix = Path.Combine(Path.GetTempPath(), $"RSEPostExtensions_x264_{Guid.NewGuid():N}");
-		string nullTarget = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "NUL" : "/dev/null"; // hopefully works on linux?? no clue about the like 3 mac users
-		string scaleArg = targetHeight.HasValue ? $"-vf \"scale=-2:{targetHeight.Value}\"" : string.Empty;
-
-		try {
-			await FFMpegArguments
-				.FromFileInput(inputPath)
-				.OutputToUrl(nullTarget, options => {
-					options
-						.WithVideoCodec("libx264")
-						.WithSpeedPreset(Speed.Medium)
-						.WithVideoBitrate(videoKbps)
-						.ForceFormat("mp4")
-						.WithCustomArgument($"-an -pass 1 -passlogfile \"{passLogPrefix}\"");
-
-					if (!string.IsNullOrEmpty(scaleArg))
-						options.WithCustomArgument(scaleArg);
-				})
-				.CancellableThrough(ct)
-				.ProcessAsynchronously()
-				.ConfigureAwait(false);
-
-			await FFMpegArguments
-				.FromFileInput(inputPath)
-				.OutputToFile(outputPath, overwrite: true, options => {
-					options
-						.WithVideoCodec("libx264")
-						.WithSpeedPreset(Speed.Medium)
-						.WithVideoBitrate(videoKbps)
-						.WithAudioCodec("aac")
-						.WithAudioBitrate(audioKbps)
-						.WithFastStart()
-						.WithCustomArgument($"-maxrate {(int)(videoKbps * 1.2)}k -bufsize {videoKbps * 2}k -pass 2 -passlogfile \"{passLogPrefix}\" -pix_fmt yuv420p");
-
-					if (!string.IsNullOrEmpty(scaleArg))
-						options.WithCustomArgument(scaleArg);
-				})
-				.CancellableThrough(ct)
-				.ProcessAsynchronously()
-				.ConfigureAwait(false);
-		} finally {
-			CleanupPassLogs(passLogPrefix);
-		}
 	}
 
 	private static void CleanupPassLogs(string prefix) {
