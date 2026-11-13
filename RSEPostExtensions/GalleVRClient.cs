@@ -13,7 +13,7 @@ namespace RSEPostExtensions;
 
 public class GalleVRClient {
 	private static readonly HttpClient _http = new();
-	private static readonly Uri apiUri = new Uri("https://api.gallevr.app/");
+	private static readonly Uri apiUri = new("https://api.gallevr.app/");
 	public record GalleVRPhotoMetadata {
 		[JsonPropertyName("takenDate")]
 		public required long TakenDate { get; init; }
@@ -152,7 +152,7 @@ public class GalleVRClient {
 			$"{Uri.EscapeDataString(kvp.Key)}={Uri.EscapeDataString(kvp.Value)}"
 		));
 
-		Uri uploadEndpoint = new Uri(apiUri, $"/vrchat/photo/upload?{queryString}");
+		Uri uploadEndpoint = new(apiUri, $"/vrchat/photo/upload?{queryString}");
 
 		using var request = new HttpRequestMessage(HttpMethod.Post, uploadEndpoint);
 		request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);

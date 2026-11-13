@@ -36,7 +36,7 @@ public class MisskeyDriveClient {
 		}
 
 		private static string FormatBytes(long bytes) {
-			string[] sizes = { "B", "KiB", "MiB", "GiB", "TiB" };
+			string[] sizes = ["B", "KiB", "MiB", "GiB", "TiB"];
 			double len = bytes;
 			int order = 0;
 			while (len >= 1024 && order < sizes.Length - 1) {
@@ -53,9 +53,9 @@ public class MisskeyDriveClient {
 		string folderName,
 		string? parentId = null) {
 
-		Uri baseUri = new Uri(instanceUrl.AbsoluteUri.TrimEnd('/') + "/");
-		Uri findEndpoint = new Uri(baseUri, "api/drive/folders/find");
-		Uri createEndpoint = new Uri(baseUri, "api/drive/folders/create");
+		Uri baseUri = new(instanceUrl.AbsoluteUri.TrimEnd('/') + "/");
+		Uri findEndpoint = new(baseUri, "api/drive/folders/find");
+		Uri createEndpoint = new(baseUri, "api/drive/folders/create");
 
 		var payload = new { name = folderName, parentId };
 
@@ -89,8 +89,8 @@ public class MisskeyDriveClient {
 		bool isSensitive = false,
 		bool force = false) {
 
-		Uri baseUri = new Uri(instanceUrl.AbsoluteUri.TrimEnd('/') + "/");
-		Uri uploadEndpoint = new Uri(baseUri, "api/drive/files/create");
+		Uri baseUri = new(instanceUrl.AbsoluteUri.TrimEnd('/') + "/");
+		Uri uploadEndpoint = new(baseUri, "api/drive/files/create");
 
 		using var request = new HttpRequestMessage(HttpMethod.Post, uploadEndpoint);
 		request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
@@ -132,8 +132,8 @@ public class MisskeyDriveClient {
 	}
 	
 	public static async Task<string> GetHumanReadableDriveUsageAsync(Uri instanceUrl, string token) {
-		Uri baseUri = new Uri(instanceUrl.AbsoluteUri.TrimEnd('/') + "/");
-		Uri endpoint = new Uri(baseUri, "api/drive");
+		Uri baseUri = new(instanceUrl.AbsoluteUri.TrimEnd('/') + "/");
+		Uri endpoint = new(baseUri, "api/drive");
 
 		using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
 		request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);

@@ -8,25 +8,25 @@ using FrooxEngine;
 namespace RSEPostExtensions;
 internal class Util {
 	private static readonly HttpClient _http = new();
-	private static readonly string[] Adjectives = {
+	private static readonly string[] Adjectives = [
 		"Swift", "Clever", "Brave", "Bright", "Calm", "Eager", "Kind", "Lively",
 		"Silly", "Wild", "Gentle", "Fancy", "Proud", "Jolly", "Vast", "Sharp",
 		"Creative", "Carefree", "Antsy", "Alert", "Tired", "Sneaky", "Crafty",
 		"Poised", "Hungry", "Busy"
-	};
+	];
 
-	private static readonly string[] Colors = {
+	private static readonly string[] Colors = [
 		"Red", "Orange", "Yellow", "Green", "Blue", "Purple", "Gold", "Silver",
 		"Amber", "Ruby", "Neon", "Azure", "Jade", "Coral", "Indigo", "Onyx",
 		"Plum", "Teal", "Violet", "Cyan", "Maroon", "Brown", "White", "Black", "Tan"
-	};
+	];
 
-	private static readonly string[] Critters = {
+	private static readonly string[] Critters = [
 		"Badger", "Falcon", "Otter", "Panda", "Fox", "Wolf", "Eagle", "Tiger",
 		"Dolphin", "Koala", "Lynx", "Owl", "Panther", "Rabbit", "Bear", "Hawk",
 		"Beaver", "Aardvark", "Marten", "Dog", "Dragon", "Cat", "Avali", "Robot",
 		"Beetle", "Expie", "Dinosaur", "Bird", "Snake", "Protogen"
-	};
+	];
 
 	public static string GetMemorableName(string input) {
 		if (string.IsNullOrWhiteSpace(input))
@@ -34,7 +34,7 @@ internal class Util {
 
 		int seed = GetDeterministicHashCode(input);
 
-		Random rand = new Random(seed);
+		Random rand = new(seed);
 
 		string adjective = Adjectives[rand.Next(Adjectives.Length)];
 		string color = Colors[rand.Next(Colors.Length)];
@@ -44,13 +44,11 @@ internal class Util {
 	}
 
 	private static int GetDeterministicHashCode(string str) {
-		using (SHA256 sha256 = SHA256.Create()) {
-			byte[] hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(str));
-			return BitConverter.ToInt32(hashBytes, 0);
-		}
+		byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(str));
+		return BitConverter.ToInt32(hashBytes, 0);
 	}
 
-    private static readonly HttpClient _httpClient = new HttpClient();
+	private static readonly HttpClient _httpClient = new();
 	private static readonly ConcurrentDictionary<string, WebManifest> _manifestCache = new();
 	public static async Task<WebManifest?> GetManifestAsync(string baseUrl) {
 		string url = $"{baseUrl.TrimEnd('/')}/manifest.json";
@@ -113,7 +111,7 @@ internal class Util {
 		if (string.IsNullOrEmpty(urlStr)) return null;
 
 		if (urlStr.StartsWith("resrec://", StringComparison.OrdinalIgnoreCase)) {
-			string cleanPath = urlStr.Substring(9).TrimStart('/');
+			string cleanPath = urlStr[9..].TrimStart('/');
 			return new Uri($"https://go.resonite.com/world/{cleanPath}");
 		}
 
@@ -153,20 +151,20 @@ internal class Util {
 		}
 	}
 
-	public static async Task<(string worldName, string worldOwner, Uri? worldUrl)> GetWorldDetailsFromMetadataAsync(PhotoMetadata photo) {
+	public static async Task<(string worldName, string worldOwner, Uri? worldUrl)> GetWorldDetailsFromMetadataAsync(CameraMediaMetadataBase metadata) {
 		string worldName = "A Resonite World";
 		string worldOwner = "Unknown Creator";
-		Uri? worldUrl = ResrecToGoResonite(photo.LocationURL.Value);
+		Uri? worldUrl = ResrecToGoResonite(metadata.LocationURL.Value);
 
-		if (photo.LocationURL.Value != null) {
-			var apiResult = await FetchWorldDetailsFromUrlAsync(photo.LocationURL.Value);
+		if (metadata.LocationURL.Value != null) {
+			var apiResult = await FetchWorldDetailsFromUrlAsync(metadata.LocationURL.Value);
 
 			if (apiResult != null && apiResult.Value.IsPublic) {
 				worldName = apiResult.Value.WorldName;
 				worldOwner = apiResult.Value.OwnerName;
 			} else {
-				worldName = photo.LocationName?.Value ?? "Unknown Location";
-				worldOwner = (photo.LocationHost?._userId != null) ? await GetUsernameFromUserId(photo.LocationHost._userId, photo.World) : "Unknown Creator";
+				worldName = metadata.LocationName?.Value ?? "Unknown Location";
+				worldOwner = (metadata.LocationHost?._userId != null) ? await GetUsernameFromUserId(metadata.LocationHost._userId, metadata.World) : "Unknown Creator";
 				worldUrl = null;
 			}
 		}

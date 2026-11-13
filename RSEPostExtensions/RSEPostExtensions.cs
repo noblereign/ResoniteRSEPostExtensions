@@ -16,7 +16,7 @@ using ResoniteHotReloadLib;
 
 namespace RSEPostExtensions;
 
-public class RSEPostExtensions : ResoniteMod {
+public partial class RSEPostExtensions : ResoniteMod {
 	internal const string VERSION_CONSTANT = "4.0.1"; //Changing the version here updates it in all locations needed
 	public override string Name => "RSEPostExtensions";
 	public override string Author => "Noble";
@@ -66,11 +66,11 @@ public class RSEPostExtensions : ResoniteMod {
 	[AutoRegisterConfigKey]
 	public static readonly ModConfigurationKey<string> GalleVRToken = new("GalleVR Token", "GalleVR login token.\n\nThis can be obtained (scuffedly) by opening the Developer Tools in your browser, going to the Network tab, and looking for a request header containing 'Authorization: Bearer'. You'll only paste in the random characters that come after Bearer.", () => "");
 
-	static readonly Uri POST_TO_URI = new Uri("resdb:///b5dc11709108e26d9e9788401111a15000813a262e2c7ebee2109c4321a92ad1");
-	static readonly Uri FEDIVERSE_URI = new Uri("resdb:///87b9aee416b10948cab768e3ada9f5537d453f78971d6537ab4ad818e90a5daf.webp");
-	static readonly Uri GALLEVR_URI = new Uri("resdb:///33070a028930ac3e520443134d5afd04bfcc57dc7a2b17e612147c52ca0f73c7.png");
-	static readonly Uri BLUESKY_URI = new Uri("resdb:///ea11f4de18ccdf349bb0b896d24244adcb048979b1705cd82c851d1299792fcc.png");
-	static readonly Uri ERROR_URI = new Uri("resdb:///92a0b1cf9536b1e675e3e1c4db52133c5dc0596d128d7bb91582ce75bfb6a9da");
+	static readonly Uri POST_TO_URI = new("resdb:///b5dc11709108e26d9e9788401111a15000813a262e2c7ebee2109c4321a92ad1");
+	static readonly Uri FEDIVERSE_URI = new("resdb:///87b9aee416b10948cab768e3ada9f5537d453f78971d6537ab4ad818e90a5daf.webp");
+	static readonly Uri GALLEVR_URI = new("resdb:///33070a028930ac3e520443134d5afd04bfcc57dc7a2b17e612147c52ca0f73c7.png");
+	static readonly Uri BLUESKY_URI = new("resdb:///ea11f4de18ccdf349bb0b896d24244adcb048979b1705cd82c851d1299792fcc.png");
+	static readonly Uri ERROR_URI = new("resdb:///92a0b1cf9536b1e675e3e1c4db52133c5dc0596d128d7bb91582ce75bfb6a9da");
 
 	const string MENU_ITEM_TAG = "RSE_POST_TO_DISCORD";
 
@@ -97,7 +97,7 @@ public class RSEPostExtensions : ResoniteMod {
 
 	static void Setup() {
 		PatchRSE();
-		Harmony harmony = new Harmony(harmonyId);
+		Harmony harmony = new(harmonyId);
 		harmony.PatchAll();
 	}
 
@@ -128,7 +128,7 @@ public class RSEPostExtensions : ResoniteMod {
 			);
 
 			if (targetPostfix != null) {
-				Harmony harmony = new Harmony(harmonyId);
+				Harmony harmony = new(harmonyId);
 				var myPrefix = new HarmonyMethod(typeof(RSEPostExtensions), nameof(RSEPostExtensions.ContextMenuHook));
 
 				harmony.Patch(targetPostfix, prefix: myPrefix);
@@ -138,7 +138,7 @@ public class RSEPostExtensions : ResoniteMod {
 		}
 	}
 
-	static void GenerateDiscordButtons(ContextMenu menu, PhotoMetadata metadata) {
+	static void GenerateDiscordButtons(ContextMenu menu, CameraMediaMetadataBase metadata) {
 		string? PEUrls = Config!.GetValue(DiscordURLs) is string s && !string.IsNullOrWhiteSpace(s) ? s : null;
 		ModConfiguration? RSEConfig = ModLoader.Mods().FirstOrDefault(m => m.Name == "ResoniteScreenshotExtensions")?.GetConfiguration();
 		ModConfigurationKey? RSEDiscordUrlKey = RSEConfig?.ConfigurationItemDefinitions.FirstOrDefault(m => m.Name == "DiscordWebhookUrl");
@@ -186,9 +186,9 @@ public class RSEPostExtensions : ResoniteMod {
 	}
 
 	public static Uri BuildMkShareUri(string baseUrl, string relativePath, string text, string fileId) {
-		Uri baseUri = new Uri(baseUrl.TrimEnd('/') + "/");
-		Uri fullEndpoint = new Uri(baseUri, relativePath.TrimStart('/'));
-		UriBuilder builder = new UriBuilder(fullEndpoint);
+		Uri baseUri = new(baseUrl.TrimEnd('/') + "/");
+		Uri fullEndpoint = new(baseUri, relativePath.TrimStart('/'));
+		UriBuilder builder = new(fullEndpoint);
 		var query = HttpUtility.ParseQueryString(builder.Query);
 		query["text"] = text;
 		query["fileIds"] = fileId;
@@ -197,16 +197,16 @@ public class RSEPostExtensions : ResoniteMod {
 		return builder.Uri;
 	}
 
-	static async Task<string> FormatPostBody(string template, PhotoMetadata photo, string? apiWorldName, string? apiWorldOwner, string? worldUrl) {
+	static async Task<string> FormatPostBody(string template, CameraMediaMetadataBase metadata, string? apiWorldName, string? apiWorldOwner, string? worldUrl) {
 		if (string.IsNullOrWhiteSpace(template)) return "";
 
-		var time = photo.TimeTaken.Value.Kind == DateTimeKind.Utc ? photo.TimeTaken.Value.ToLocalTime() : photo.TimeTaken.Value;
+		var time = metadata.TimeTaken.Value.Kind == DateTimeKind.Utc ? metadata.TimeTaken.Value.ToLocalTime() : metadata.TimeTaken.Value;
 
-		string Fallback(string? val) => string.IsNullOrWhiteSpace(val) ? "Unknown" : val;
+		static string Fallback(string? val) => string.IsNullOrWhiteSpace(val) ? "Unknown" : val;
 
-		string photographerName = await Util.GetUsernameFromUserId(photo.TakenBy._userId, photo.World);
-		string hostName = await Util.GetUsernameFromUserId(photo.LocationHost._userId.Value, photo.World);
-		string locationName = Fallback(RSE.PhotoMetadata_Patch.SanitizeText(photo.LocationName));
+		string photographerName = await Util.GetUsernameFromUserId(metadata.TakenBy._userId, metadata.World);
+		string hostName = await Util.GetUsernameFromUserId(metadata.LocationHost._userId.Value, metadata.World);
+		string locationName = Fallback(RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName));
 
 		string resolvedWorldName = !string.IsNullOrWhiteSpace(apiWorldName) ? apiWorldName : locationName;
 		string resolvedWorldOwner = !string.IsNullOrWhiteSpace(apiWorldOwner) ? apiWorldOwner : Fallback(hostName);
@@ -218,13 +218,13 @@ public class RSEPostExtensions : ResoniteMod {
 			.Replace("<WorldName>", resolvedWorldName)
 			.Replace("<WorldOwner>", resolvedWorldOwner)
 			.Replace("<Time>", time.ToString("yyyy-MM-dd HH:mm"))
-			.Replace("<AppVersion>", Fallback(photo.AppVersion.Value))
-			.Replace("<RendererName>", Fallback(photo.RendererName.Value))
-			.Replace("<CameraManufacturer>", Fallback(photo.CameraManufacturer.Value))
-			.Replace("<CameraModel>", Fallback(photo.CameraModel.Value))
-			.Replace("<CameraFOV>", photo.CameraFOV.Value.ToString("0.##"));
+			.Replace("<AppVersion>", Fallback(metadata.AppVersion.Value))
+			.Replace("<RendererName>", Fallback(metadata.RendererName.Value))
+			.Replace("<CameraManufacturer>", Fallback(metadata.CameraManufacturer.Value))
+			.Replace("<CameraModel>", Fallback(metadata.CameraModel.Value))
+			.Replace("<CameraFOV>", (metadata is PhotoMetadata photometa) ? photometa.CameraFOV.Value.ToString("0.##") : "Variable");
 
-		template = System.Text.RegularExpressions.Regex.Replace(template, @"<WorldLink(?:\:(.*?))?>", match => {
+		template = WorldLinkRegex().Replace(template, match => {
 			if (string.IsNullOrEmpty(worldUrl)) {
 				return Config?.GetValue(UnpublishedWorldFallback) ?? "";
 			}
@@ -239,191 +239,195 @@ public class RSEPostExtensions : ResoniteMod {
 		return template;
 	}
 
-	static async Task<string> AltTextFromMetadata(PhotoMetadata photo) {
-		Slot? extendedTagSlot = photo.Slot.FindChild("PhotoMetadata_Tags");
+	static async Task<string> AltTextFromMetadata(CameraMediaMetadataBase metadata) {
+		Slot? extendedTagSlot = metadata.Slot.FindChild("PhotoMetadata_Tags");
 
-		string photographerName = await Util.GetUsernameFromUserId(photo.TakenBy._userId, photo.World);
+		string photographerName = await Util.GetUsernameFromUserId(metadata.TakenBy._userId, metadata.World);
 
-		var (article, lensType, standardType, selfieType) = photo.CameraFOV.Value switch {
+		PhotoMetadata? photometa = metadata as PhotoMetadata;
+
+		var (article, lensType, standardType, selfieType) = (photometa != null) ? photometa.CameraFOV.Value switch {
 			>= 179f => ("A", "360°", "capture ", "capture"),
 			> 85f => ("An", "ultra-wide ", "photo", "selfie"),
 			> 65f => ("A", "wide-angle ", "photo", "selfie"),
 			< 40f => ("A", "telephoto ", "shot", "portrait"),
 			_ => ("A", "", "photo", "selfie")
-		};
+		} : ("A", "", "video", "video");
 
-		float fovRad = photo.CameraFOV.Value * (MathF.PI / 180f);
+		float fovRad = photometa?.CameraFOV.Value * (MathF.PI / 180f) ?? 70;
 		float tanHalfFov = MathF.Tan(fovRad / 2f);
 
-		string altText = $"{article} {lensType}{standardType} from Resonite, taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(photo.LocationName)}.";
-		
-		if (extendedTagSlot != null) {
-			DynamicVariableSpace extendedTagSpace = extendedTagSlot.FindSpace("PhotoMetadata");
-			if (extendedTagSpace != null) {
+		string altText = $"{article} {lensType}{standardType} from Resonite, taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName)}.";
 
-				List<(string uid, string username, float screenX, float distance)> usersData = new();
-				bool isSelfie = false;
+		if (photometa != null) { // only do advanced alt text for photos 
+			if (extendedTagSlot != null) {
+				DynamicVariableSpace extendedTagSpace = extendedTagSlot.FindSpace("PhotoMetadata");
+				if (extendedTagSpace != null) {
 
-				Msg("Processing extended tags...");
-				foreach (AssetMetadata.UserInfo userInfo in photo.UserInfos) {
-					string uid = userInfo.User._userId.Value;
-					bool isInView = true; // we would rather tag people if FixPhotoMetadata isnt installed
-					float headScale = 1.0f;
+					List<(string uid, string username, float screenX, float distance)> usersData = [];
+					bool isSelfie = false;
 
-					if (extendedTagSlot != null && extendedTagSpace != null) {
-						bool viewTagFound = extendedTagSpace.TryReadValue<bool>($"{uid}.isInView", out isInView);
-						if (!viewTagFound) {
-							// user might be using older version of FixPhotoMetadata... (https://github.com/BlueberryWolf/FixPhotoMetadata/issues/1)
-							// work around by scanning components directly instead :')
-							Slot? userTagSlot = extendedTagSlot.FindChild(uid);
+					Msg("Processing extended tags...");
+					foreach (AssetMetadata.UserInfo userInfo in metadata.UserInfos) {
+						string uid = userInfo.User._userId.Value;
+						bool isInView = true; // we would rather tag people if FixPhotoMetadata isnt installed
+						float headScale = 1.0f;
 
-							if (userTagSlot != null) {
-								DynamicValueVariable<bool>? isInViewComponent = userTagSlot.GetComponents<DynamicValueVariable<bool>>().FirstOrDefault(v => v.VariableName.Value.Contains("isInView"));
-								if (isInViewComponent != null) {
-									isInView = isInViewComponent.Value.Value;
+						if (extendedTagSlot != null && extendedTagSpace != null) {
+							bool viewTagFound = extendedTagSpace.TryReadValue<bool>($"{uid}.isInView", out isInView);
+							if (!viewTagFound) {
+								// user might be using older version of FixPhotoMetadata... (https://github.com/BlueberryWolf/FixPhotoMetadata/issues/1)
+								// work around by scanning components directly instead :')
+								Slot? userTagSlot = extendedTagSlot.FindChild(uid);
+
+								if (userTagSlot != null) {
+									DynamicValueVariable<bool>? isInViewComponent = userTagSlot.GetComponents<DynamicValueVariable<bool>>().FirstOrDefault(v => v.VariableName.Value.Contains("isInView"));
+									if (isInViewComponent != null) {
+										isInView = isInViewComponent.Value.Value;
+									}
+								}
+							}
+
+							bool scaleTagFound = extendedTagSpace.TryReadValue<float>($"{uid}.headScale", out headScale);
+							if (!scaleTagFound) {
+								// user might be using older version of FixPhotoMetadata... (https://github.com/BlueberryWolf/FixPhotoMetadata/issues/1)
+								// work around by scanning components directly instead :')
+								Slot? userTagSlot = extendedTagSlot.FindChild(uid);
+
+								if (userTagSlot != null) {
+									DynamicValueVariable<float>? headScaleComponent = userTagSlot.GetComponents<DynamicValueVariable<float>>().FirstOrDefault(v => v.VariableName.Value.Contains("headScale"));
+									if (headScaleComponent != null) {
+										headScale = headScaleComponent.Value.Value;
+									}
 								}
 							}
 						}
 
-						bool scaleTagFound = extendedTagSpace.TryReadValue<float>($"{uid}.headScale", out headScale);
-						if (!scaleTagFound) {
-							// user might be using older version of FixPhotoMetadata... (https://github.com/BlueberryWolf/FixPhotoMetadata/issues/1)
-							// work around by scanning components directly instead :')
-							Slot? userTagSlot = extendedTagSlot.FindChild(uid);
+						float3 userPos = userInfo.HeadPosition;
+						float3 toUser = userPos - metadata.TakenGlobalPosition.Value;
+						floatQ inverseCamRot = metadata.TakenGlobalRotation.Value.Inverted;
+						float3 localPos = inverseCamRot * toUser;
 
-							if (userTagSlot != null) {
-								DynamicValueVariable<float>? headScaleComponent = userTagSlot.GetComponents<DynamicValueVariable<float>>().FirstOrDefault(v => v.VariableName.Value.Contains("headScale"));
-								if (headScaleComponent != null) {
-									headScale = headScaleComponent.Value.Value;
-								}
+						// discard users who are definitely not visible in the photo
+						if (localPos.z > 0.05f) {
+							// assuming heads are at most .3 meters
+							float actualHeadSize = 0.3f * headScale;
+
+							float viewHeightAtDepth = 2f * localPos.z * MathF.Tan(fovRad / 2f);
+							float screenCoverage = actualHeadSize / viewHeightAtDepth;
+
+							if (screenCoverage < 0.015f) {
+								isInView = false;
 							}
 						}
-					}
 
-					float3 userPos = userInfo.HeadPosition;
-					float3 toUser = userPos - photo.TakenGlobalPosition.Value;
-					floatQ inverseCamRot = photo.TakenGlobalRotation.Value.Inverted;
-					float3 localPos = inverseCamRot * toUser;
+						if (isInView) {
+							string username = await Util.GetUsernameFromUserId(uid, metadata.World);
 
-					// discard users who are definitely not visible in the photo
-					if (localPos.z > 0.05f) {
-						// assuming heads are at most .3 meters
-						float actualHeadSize = 0.3f * headScale;
+							if (uid == metadata.TakenBy._userId.Value) {
+								isSelfie = true;
+							}
 
-						float viewHeightAtDepth = 2f * localPos.z * MathF.Tan(fovRad / 2f);
-						float screenCoverage = actualHeadSize / viewHeightAtDepth;
+							float tanTheta = localPos.x / localPos.z;
+							float screenX = tanTheta / tanHalfFov;
 
-						if (screenCoverage < 0.015f) {
-							isInView = false;
+							usersData.Add((uid, username, screenX, localPos.z));
 						}
 					}
 
-					if (isInView) {
-						string username = await Util.GetUsernameFromUserId(uid, photo.World);
-
-						if (uid == photo.TakenBy._userId.Value) {
-							isSelfie = true;
-						}
-
-						float tanTheta = localPos.x / localPos.z;
-						float screenX = tanTheta / tanHalfFov;
-
-						usersData.Add((uid, username, screenX, localPos.z));
+					string JoinSegments(List<string> segs) {
+						if (segs.Count == 0) return "";
+						if (segs.Count == 1) return segs[0];
+						if (segs.Count == 2) return $"{segs[0]} and {segs[1]}";
+						return $"{string.Join(", ", segs.Take(segs.Count - 1))}, and {segs.Last()}";
 					}
-				}
 
-				string JoinSegments(List<string> segs) {
-					if (segs.Count == 0) return "";
-					if (segs.Count == 1) return segs[0];
-					if (segs.Count == 2) return $"{segs[0]} and {segs[1]}";
-					return $"{string.Join(", ", segs.Take(segs.Count - 1))}, and {segs.Last()}";
-				}
+					string FormatPositions(List<(string uid, string username, float screenX, float distance)> users) {
+						var left = users.Where(u => u.screenX < -0.3f).Select(u => u.username).ToList();
+						var center = users.Where(u => u.screenX >= -0.3f && u.screenX <= 0.3f).Select(u => u.username).ToList();
+						var right = users.Where(u => u.screenX > 0.3f).Select(u => u.username).ToList();
 
-				string FormatPositions(List<(string uid, string username, float screenX, float distance)> users) {
-					var left = users.Where(u => u.screenX < -0.3f).Select(u => u.username).ToList();
-					var center = users.Where(u => u.screenX >= -0.3f && u.screenX <= 0.3f).Select(u => u.username).ToList();
-					var right = users.Where(u => u.screenX > 0.3f).Select(u => u.username).ToList();
+						List<string> segments = [];
+						if (left.Count > 0) segments.Add($"{JoinSegments(left)} on the left");
+						if (center.Count > 0) segments.Add($"{JoinSegments(center)} in the center");
+						if (right.Count > 0) segments.Add($"{JoinSegments(right)} on the right");
 
-					List<string> segments = new List<string>();
-					if (left.Count > 0) segments.Add($"{JoinSegments(left)} on the left");
-					if (center.Count > 0) segments.Add($"{JoinSegments(center)} in the center");
-					if (right.Count > 0) segments.Add($"{JoinSegments(right)} on the right");
+						return JoinSegments(segments);
+					}
 
-					return JoinSegments(segments);
-				}
+					// if it's a solo selfie then don't bother mentioning where they are
+					if (usersData.Count == 1 && usersData[0].uid == metadata.TakenBy._userId) {
+						usersData.Clear();
+					}
 
-				// if it's a solo selfie then don't bother mentioning where they are
-				if (usersData.Count == 1 && usersData[0].uid == photo.TakenBy._userId) {
-					usersData.Clear();
-				}
+					int totalUsers = usersData.Count;
+					string crowdText = totalUsers >= 5 ? $". {totalUsers} users are visible in the photo" : "";
+					string baseText = $"{article} {lensType}{(isSelfie ? selfieType : standardType)} from Resonite, taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName)}{crowdText}.";
 
-				int totalUsers = usersData.Count;
-				string crowdText = totalUsers >= 5 ? $". {totalUsers} users are visible in the photo" : "";
-				string baseText = $"{article} {lensType}{(isSelfie ? selfieType : standardType)} from Resonite, taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(photo.LocationName)}{crowdText}.";
+					float depthThreshold = photometa.CameraFOV.Value switch {
+						>= 179f => 2.0f,
+						> 85f => 2.5f,
+						> 65f => 3.0f,
+						< 40f => 6.0f,
+						_ => 4.0f
+					};
 
-				float depthThreshold = photo.CameraFOV.Value switch {
-					>= 179f => 2.0f,
-					> 85f => 2.5f,
-					> 65f => 3.0f,
-					< 40f => 6.0f,
-					_ => 4.0f
-				};
+					var foregroundUsers = usersData.Where(u => u.distance < depthThreshold).ToList();
+					var backgroundUsers = usersData.Where(u => u.distance >= depthThreshold).ToList();
 
-				var foregroundUsers = usersData.Where(u => u.distance < depthThreshold).ToList();
-				var backgroundUsers = usersData.Where(u => u.distance >= depthThreshold).ToList();
+					string subjectText = "";
+					float togetherThreshold = 1f;
+					string shotWord = isSelfie ? "shot" : "photo";
 
-				string subjectText = "";
-				float togetherThreshold = 1f;
-				string shotWord = isSelfie ? "shot" : "photo";
+					int fgLimit = 6;
+					int totalLimit = 10;
 
-				int fgLimit = 6;
-				int totalLimit = 10;
+					if (totalUsers == 0) {
+						subjectText = "";
+					} else if (foregroundUsers.Count > fgLimit) {
+						// theres absolutely too many people in this photo for alt text
+						subjectText = $"That's too many to list everyone individually.";
+					} else if (totalUsers > totalLimit) {
+						// list out foreground but not background because of crowding
+						if (foregroundUsers.Count > 0) {
+							bool fgTogether = foregroundUsers.Count == 2 && Math.Abs(foregroundUsers[0].screenX - foregroundUsers[1].screenX) < togetherThreshold;
+							string fgText = fgTogether
+								? $"{foregroundUsers[0].username} and {foregroundUsers[1].username} together"
+								: FormatPositions(foregroundUsers);
 
-				if (totalUsers == 0) {
-					subjectText = "";
-				} else if (foregroundUsers.Count > fgLimit) {
-					// theres absolutely too many people in this photo for alt text
-					subjectText = $"That's too many to list everyone individually.";
-				} else if (totalUsers > totalLimit) {
-					// list out foreground but not background because of crowding
-					if (foregroundUsers.Count > 0) {
+							subjectText = $" It features {fgText}. In the background, there's a crowd of {backgroundUsers.Count} other users.";
+						} else {
+							subjectText = $" In the distance, there's a crowd of {backgroundUsers.Count} users.";
+						}
+					} else if (foregroundUsers.Count > 0 && backgroundUsers.Count == 0) {
+						// only foreground
+						bool fgTogether = foregroundUsers.Count == 2 && Math.Abs(foregroundUsers[0].screenX - foregroundUsers[1].screenX) < togetherThreshold;
+						subjectText = fgTogether
+							? $" {foregroundUsers[0].username} and {foregroundUsers[1].username} are together in the {shotWord}."
+							: $" It features {FormatPositions(foregroundUsers)}.";
+					} else if (foregroundUsers.Count == 0 && backgroundUsers.Count > 0) {
+						// only background
+						bool bgTogether = backgroundUsers.Count == 2 && Math.Abs(backgroundUsers[0].screenX - backgroundUsers[1].screenX) < togetherThreshold;
+						subjectText = bgTogether
+							? $" You can see {backgroundUsers[0].username} and {backgroundUsers[1].username} in the distance together."
+							: $" In the distance, you can see {FormatPositions(backgroundUsers)}.";
+					} else {
+						// mixed depth
 						bool fgTogether = foregroundUsers.Count == 2 && Math.Abs(foregroundUsers[0].screenX - foregroundUsers[1].screenX) < togetherThreshold;
 						string fgText = fgTogether
 							? $"{foregroundUsers[0].username} and {foregroundUsers[1].username} together"
 							: FormatPositions(foregroundUsers);
 
-						subjectText = $" It features {fgText}. In the background, there's a crowd of {backgroundUsers.Count} other users.";
-					} else {
-						subjectText = $" In the distance, there's a crowd of {backgroundUsers.Count} users.";
+						bool bgTogether = backgroundUsers.Count == 2 && Math.Abs(backgroundUsers[0].screenX - backgroundUsers[1].screenX) < togetherThreshold;
+						string bgText = bgTogether
+							? $"{backgroundUsers[0].username} and {backgroundUsers[1].username} together"
+							: FormatPositions(backgroundUsers);
+
+						subjectText = $" It features {fgText}. In the background, you can spot {bgText}.";
 					}
-				} else if (foregroundUsers.Count > 0 && backgroundUsers.Count == 0) {
-					// only foreground
-					bool fgTogether = foregroundUsers.Count == 2 && Math.Abs(foregroundUsers[0].screenX - foregroundUsers[1].screenX) < togetherThreshold;
-					subjectText = fgTogether
-						? $" {foregroundUsers[0].username} and {foregroundUsers[1].username} are together in the {shotWord}."
-						: $" It features {FormatPositions(foregroundUsers)}.";
-				} else if (foregroundUsers.Count == 0 && backgroundUsers.Count > 0) {
-					// only background
-					bool bgTogether = backgroundUsers.Count == 2 && Math.Abs(backgroundUsers[0].screenX - backgroundUsers[1].screenX) < togetherThreshold;
-					subjectText = bgTogether
-						? $" You can see {backgroundUsers[0].username} and {backgroundUsers[1].username} in the distance together."
-						: $" In the distance, you can see {FormatPositions(backgroundUsers)}.";
-				} else {
-					// mixed depth
-					bool fgTogether = foregroundUsers.Count == 2 && Math.Abs(foregroundUsers[0].screenX - foregroundUsers[1].screenX) < togetherThreshold;
-					string fgText = fgTogether
-						? $"{foregroundUsers[0].username} and {foregroundUsers[1].username} together"
-						: FormatPositions(foregroundUsers);
 
-					bool bgTogether = backgroundUsers.Count == 2 && Math.Abs(backgroundUsers[0].screenX - backgroundUsers[1].screenX) < togetherThreshold;
-					string bgText = bgTogether
-						? $"{backgroundUsers[0].username} and {backgroundUsers[1].username} together"
-						: FormatPositions(backgroundUsers);
-
-					subjectText = $" It features {fgText}. In the background, you can spot {bgText}.";
+					altText = $"{baseText}{subjectText}";
 				}
-
-				altText = $"{baseText}{subjectText}";
 			}
 		}
 
@@ -431,7 +435,7 @@ public class RSEPostExtensions : ResoniteMod {
 	}
 
 
-	static void GenerateMisskeyButtons(ContextMenu menu, PhotoMetadata metadata) {
+	static void GenerateMisskeyButtons(ContextMenu menu, CameraMediaMetadataBase metadata) {
 		string? urlsStringList = Config!.GetValue(MisskeyURLs) is string s && !string.IsNullOrWhiteSpace(s) ? s : null;
 		if (urlsStringList == null) {
 			return;
@@ -506,14 +510,14 @@ public class RSEPostExtensions : ResoniteMod {
 				currentState = ButtonState.Uploading;
 				UpdateButtonVisuals();
 
-				(string? fileId, string? postBody) uploadResult = await PostToMisskeyAsync(metadata, new Uri(baseUrl), token);
+				(string? fileId, string? postBody) = await PostToMisskeyAsync(metadata, new Uri(baseUrl), token);
 
 				if (menuItem == null || menuItem.IsRemoved) return;
 
-				if (uploadResult.fileId != null) {
+				if (fileId != null) {
 					menuItem.RunSynchronously(() => {
 						Hyperlink linkComponent = menuItem.Slot.AttachComponent<Hyperlink>();
-						linkComponent.URL.Value = BuildMkShareUri(baseUrl, "/share", uploadResult.postBody ?? "", uploadResult.fileId);
+						linkComponent.URL.Value = BuildMkShareUri(baseUrl, "/share", postBody ?? "", fileId);
 						linkComponent.Reason.Value = $"Share this photo on {currentInstanceName}";
 						currentState = ButtonState.Success;
 					});
@@ -569,29 +573,29 @@ public class RSEPostExtensions : ResoniteMod {
 		}
 	}
 
-	static async Task<(string? fileId, string? postBody)> PostToMisskeyAsync(PhotoMetadata photo, Uri instanceUrl, string accessToken) {
+	static async Task<(string? fileId, string? postBody)> PostToMisskeyAsync(CameraMediaMetadataBase metadata, Uri instanceUrl, string accessToken) {
 		if (!Config!.GetValue(Multiposting)) {
-			photo.LocalUser.CloseContextMenu(null!);
+			metadata.LocalUser.CloseContextMenu(null!);
 		}
 		Msg("Posting to Misskey...");
 
-		var tex = photo.Slot.GetComponent<StaticTexture2D>();
+		var tex = metadata.Slot.GetComponent<StaticTexture2D>();
 		var url = tex?.URL.Value;
 		if (url is null) return (null, null);
 
-		(string worldName, string worldOwner, Uri? worldUri) = await Util.GetWorldDetailsFromMetadataAsync(photo);
+		(string worldName, string worldOwner, Uri? worldUri) = await Util.GetWorldDetailsFromMetadataAsync(metadata);
 		string? worldUrl = worldUri?.OriginalString;
 
-		string altText = await AltTextFromMetadata(photo);
-		string postBodyText = await FormatPostBody(Config!.GetValue(MisskeyPostBody) ?? "", photo, worldName, worldOwner, worldUrl);
+		string altText = await AltTextFromMetadata(metadata);
+		string postBodyText = await FormatPostBody(Config!.GetValue(MisskeyPostBody) ?? "", metadata, worldName, worldOwner, worldUrl);
 
 		await new ToBackground();
 
 		try {
 			string folderName = Config?.GetValue(MisskeyFolderName) ?? "Resonite";
-			string fileName = (photo.TimeTaken.Value.Kind == DateTimeKind.Utc ? photo.TimeTaken.Value.ToLocalTime() : photo.TimeTaken.Value).ToString("yyyy-MM-dd HH.mm.ss");
+			string fileName = (metadata.TimeTaken.Value.Kind == DateTimeKind.Utc ? metadata.TimeTaken.Value.ToLocalTime() : metadata.TimeTaken.Value).ToString("yyyy-MM-dd HH.mm.ss");
 
-			var gatherTask = photo.Engine.AssetManager.GatherAssetFile(url, 100f).AsTask();
+			var gatherTask = metadata.Engine.AssetManager.GatherAssetFile(url, 100f).AsTask();
 			var folderTask = GetCachedFolderIdAsync(instanceUrl, accessToken, folderName);
 
 			await Task.WhenAll((Task)gatherTask, folderTask);
@@ -633,7 +637,7 @@ public class RSEPostExtensions : ResoniteMod {
 		return folder?.Id;
 	}
 
-	static void GenerateGalleVRButton(ContextMenu menu, PhotoMetadata metadata) {
+	static void GenerateGalleVRButton(ContextMenu menu, CameraMediaMetadataBase metadata) {
 		string? gvrToken = Config!.GetValue(GalleVRToken) is string s && !string.IsNullOrWhiteSpace(s) ? s : null;
 		if (gvrToken == null) {
 			return;
@@ -720,29 +724,31 @@ public class RSEPostExtensions : ResoniteMod {
 			});
 		};
 	}
-	static bool CheckGalleValidity(PhotoMetadata photo) {
-		if (photo == null) return false;
-		if (string.IsNullOrWhiteSpace(photo.CameraManufacturer.Value)) return false;
-		if (photo.TakenBy._userId.Value != Engine.Current.Cloud.CurrentUserID) return false;
+	static bool CheckGalleValidity(CameraMediaMetadataBase metadata) {
+		if (metadata == null) return false;
+		if (string.IsNullOrWhiteSpace(metadata.CameraManufacturer.Value)) return false;
+		if (metadata.TakenBy._userId.Value != Engine.Current.Cloud.CurrentUserID) return false;
+		if (metadata is not PhotoMetadata) return false;
 
 		return true;
 	}
 
-	static async Task<string?> PostToGalleVRAsync(PhotoMetadata photo, string token) {
+	static async Task<string?> PostToGalleVRAsync(CameraMediaMetadataBase potentialMetadata, string token) {
+		if (potentialMetadata is not PhotoMetadata metadata) return null;
 		if (!Config!.GetValue(Multiposting)) {
-			photo.LocalUser.CloseContextMenu(null!);
+			metadata.LocalUser.CloseContextMenu(null!);
 		}
 		Msg("Posting to GalleVR...");
 
-		var tex = photo.Slot.GetComponent<StaticTexture2D>();
+		var tex = metadata.Slot.GetComponent<StaticTexture2D>();
 		var url = tex?.URL.Value;
 		if (url is null) return null;
 
-		List<GalleVRClient.Player> galleVRPlayers = new();
-		Slot? extendedTagSlot = photo.Slot.FindChild("PhotoMetadata_Tags");
-		DynamicVariableSpace? extendedTagSpace = extendedTagSlot?.FindSpace("PhotoMetadata");
+		List<GalleVRClient.Player> galleVRPlayers = [];
+		Slot? extendedTagSlot = metadata.Slot.FindChild("PhotoMetadata_Tags");
+		DynamicVariableSpace? extendedTagSpace = extendedTagSlot?.FindSpace("CameraMediaMetadataBase");
 
-		foreach (AssetMetadata.UserInfo userInfo in photo.UserInfos) {
+		foreach (AssetMetadata.UserInfo userInfo in metadata.UserInfos) {
 			string? uid = userInfo.User._userId.Value;
 			if (uid is null) continue;
 
@@ -781,7 +787,7 @@ public class RSEPostExtensions : ResoniteMod {
 
 			galleVRPlayers.Add(new GalleVRClient.Player {
 				Id = uid,
-				Name = await Util.GetUsernameFromUserId(uid, photo.World),
+				Name = await Util.GetUsernameFromUserId(uid, metadata.World),
 				HeadPosition = GalleVRClient.Player.PackPosition(userInfo.HeadPosition.Value, headScale, isInView),
 				HeadOrientation = GalleVRClient.Player.PackOrientation(userInfo.HeadOrientation.Value)
 			});
@@ -791,7 +797,7 @@ public class RSEPostExtensions : ResoniteMod {
 
 		try {
 			
-			var gatherTask = photo.Engine.AssetManager.GatherAssetFile(url, 100f).AsTask();
+			var gatherTask = metadata.Engine.AssetManager.GatherAssetFile(url, 100f).AsTask();
 			await Task.WhenAll((Task)gatherTask);
 
 			string? tmpPath = await gatherTask;
@@ -801,25 +807,25 @@ public class RSEPostExtensions : ResoniteMod {
 			}
 
 			GalleVRClient.GalleVRPhotoMetadata formattedMetadata = new() {
-				TakenById = photo.TakenBy._userId.Value,
-				TakenDate = new DateTimeOffset(photo.TimeTaken.Value).ToUnixTimeMilliseconds(),
-				Filename = (photo.TimeTaken.Value.Kind == DateTimeKind.Utc ? photo.TimeTaken.Value.ToLocalTime() : photo.TimeTaken.Value).ToString("yyyy-MM-dd HH.mm.ss") + ".webp",
+				TakenById = metadata.TakenBy._userId.Value,
+				TakenDate = new DateTimeOffset(metadata.TimeTaken.Value).ToUnixTimeMilliseconds(),
+				Filename = (metadata.TimeTaken.Value.Kind == DateTimeKind.Utc ? metadata.TimeTaken.Value.ToLocalTime() : metadata.TimeTaken.Value).ToString("yyyy-MM-dd HH.mm.ss") + ".webp",
 				LocalPath = tmpPath,
-				CameraManufacturer = photo.CameraManufacturer.Value ?? "Resonite",
+				CameraManufacturer = metadata.CameraManufacturer.Value ?? "Resonite",
 				Application = "Resonite",
 				IsNonVrcx = false,
-				CameraFov = photo.CameraFOV.Value,
-				TakenGlobalPosition = GalleVRClient.SpatialData.FromFloat3(photo.TakenGlobalPosition.Value),
-				TakenGlobalRotation = GalleVRClient.SpatialData.FromFloatQ(photo.TakenGlobalRotation.Value),
-				TakenGlobalScale = GalleVRClient.SpatialData.FromFloat3(photo.TakenGlobalScale.Value),
+				CameraFov = metadata.CameraFOV.Value,
+				TakenGlobalPosition = GalleVRClient.SpatialData.FromFloat3(metadata.TakenGlobalPosition.Value),
+				TakenGlobalRotation = GalleVRClient.SpatialData.FromFloatQ(metadata.TakenGlobalRotation.Value),
+				TakenGlobalScale = GalleVRClient.SpatialData.FromFloat3(metadata.TakenGlobalScale.Value),
 				World = new GalleVRClient.WorldMetadata() {
-					Id = photo.LocationURL.Value?.OriginalString,
-					Name = photo.LocationName.Value
+					Id = metadata.LocationURL.Value?.OriginalString,
+					Name = metadata.LocationName.Value
 				},
 				Players = galleVRPlayers
 			};
 
-			string? photoUrl = await GalleVRClient.UploadFileAsync(photo.TakenBy._userId.Value, token, tmpPath, formattedMetadata, photo);
+			string? photoUrl = await GalleVRClient.UploadFileAsync(metadata.TakenBy._userId.Value, token, tmpPath, formattedMetadata, metadata);
 			// GalleVR returns the photo link (yay!) but going to it just redirects to an empty profile (bruh)
 			Msg($"Upload finished!");
 			return photoUrl;
@@ -833,7 +839,7 @@ public class RSEPostExtensions : ResoniteMod {
 		}
 	}
 
-	static void GenerateBlueskyButtons(ContextMenu menu, PhotoMetadata metadata) {
+	static void GenerateBlueskyButtons(ContextMenu menu, CameraMediaMetadataBase metadata) {
 		string? identitiesStringList = Config!.GetValue(BlueskyLogins) is string s && !string.IsNullOrWhiteSpace(s) ? s : null;
 		if (identitiesStringList == null) {
 			return;
@@ -936,9 +942,9 @@ public class RSEPostExtensions : ResoniteMod {
 		}
 	}
 
-	static async Task<(Uri? uri, string? warning)> PostToBlueskyAsync(PhotoMetadata photo, string handle, string password, bool forceTruncate = false) {
+	static async Task<(Uri? uri, string? warning)> PostToBlueskyAsync(CameraMediaMetadataBase metadata, string handle, string password, bool forceTruncate = false) {
 		if (!Config!.GetValue(Multiposting)) {
-			photo.LocalUser.CloseContextMenu(null!);
+			metadata.LocalUser.CloseContextMenu(null!);
 		}
 		Msg("Posting to Bluesky...");
 
@@ -955,18 +961,18 @@ public class RSEPostExtensions : ResoniteMod {
 			return (null, null);
 		}
 
-		var tex = photo.Slot.GetComponent<StaticTexture2D>();
+		var tex = metadata.Slot.GetComponent<StaticTexture2D>();
 		var url = tex?.URL.Value;
 		if (url is null) return (null, null);
 
 		await new ToBackground();
 
-		string altText = await AltTextFromMetadata(photo);
+		string altText = await AltTextFromMetadata(metadata);
 
-		(string worldName, string worldOwner, Uri? worldUri) = await Util.GetWorldDetailsFromMetadataAsync(photo);
+		(string worldName, string worldOwner, Uri? worldUri) = await Util.GetWorldDetailsFromMetadataAsync(metadata);
 		string? worldUrl = worldUri?.OriginalString;
 
-		string postBodyText = await FormatPostBody(Config!.GetValue(BlueskyPostBody) ?? "", photo, worldName, worldOwner, worldUrl);
+		string postBodyText = await FormatPostBody(Config!.GetValue(BlueskyPostBody) ?? "", metadata, worldName, worldOwner, worldUrl);
 
 		int charCount = new System.Globalization.StringInfo(postBodyText).LengthInTextElements;
 
@@ -983,7 +989,7 @@ public class RSEPostExtensions : ResoniteMod {
 		}
 
 		try {
-			string? tmpPath = await photo.Engine.AssetManager.GatherAssetFile(url, 100f).AsTask();
+			string? tmpPath = await metadata.Engine.AssetManager.GatherAssetFile(url, 100f).AsTask();
 
 			if (tmpPath is null) return (null, null);
 
@@ -1007,7 +1013,7 @@ public class RSEPostExtensions : ResoniteMod {
 		}
 	}
 
-	static bool ContextMenuHook([HarmonyArgument(0)] PhotoMetadata hookedInstance, ContextMenu menu) {
+	static bool ContextMenuHook([HarmonyArgument(0)] CameraMediaMetadataBase hookedInstance, ContextMenu menu) {
 		if (!hookedInstance.Enabled) return false;
 		if (!Config!.GetValue(Enabled)) return true;
 
@@ -1032,23 +1038,27 @@ public class RSEPostExtensions : ResoniteMod {
 		return false;
 	}
 
-	static void PostToDiscord(PhotoMetadata photo, Uri webhookUri) {
+	static void PostToDiscord(CameraMediaMetadataBase metadata, Uri webhookUri) {
 		if (!Config!.GetValue(Multiposting)) {
-			photo.LocalUser.CloseContextMenu(null!);
+			metadata.LocalUser.CloseContextMenu(null!);
 		}
 		Msg("Posting to Discord...");
 
-		photo.StartGlobalTask(async () =>
+		metadata.StartGlobalTask(async () =>
 		{
-			var tex = photo.Slot.GetComponent<StaticTexture2D>();
+			var tex = metadata.Slot.GetComponent<StaticTexture2D>();
 			var url = tex?.URL.Value;
 			if (url is null) return;
 		
 			await new ToBackground();
-			var tmpPath = await photo.Engine.AssetManager.GatherAssetFile(url, 100f);
+			var tmpPath = await metadata.Engine.AssetManager.GatherAssetFile(url, 100f);
 			if (tmpPath is null) return;
 			_urlMappings[tmpPath] = webhookUri;
-			RSE.PhotoMetadata_Patch.PostToDiscord(new Metadata(photo), tmpPath);
+			if (metadata is PhotoMetadata photometa) {
+				RSE.PhotoMetadata_Patch.PostToDiscord(new Metadata(photometa), tmpPath);
+			} else { //RSE doesn't support videos, we'll have to handle it ourselves
+
+			}
 		});
 	}
 
@@ -1089,4 +1099,7 @@ public class RSEPostExtensions : ResoniteMod {
 			Msg("Completed!");
 		}
 	}
+
+	[System.Text.RegularExpressions.GeneratedRegex(@"<WorldLink(?:\:(.*?))?>")]
+	public static partial System.Text.RegularExpressions.Regex WorldLinkRegex();
 }

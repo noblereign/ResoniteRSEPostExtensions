@@ -81,7 +81,7 @@ public class BlueskyClient {
 	}
 
 	public static async Task<SessionResponse> CreateSessionAsync(Uri pdsUrl, string identifier, string password) {
-		Uri authEndpoint = new Uri(pdsUrl, "xrpc/com.atproto.server.createSession");
+		Uri authEndpoint = new(pdsUrl, "xrpc/com.atproto.server.createSession");
 
 		var payload = new SessionRequest(identifier, password);
 		using var request = new HttpRequestMessage(HttpMethod.Post, authEndpoint);
@@ -94,7 +94,7 @@ public class BlueskyClient {
 	}
 
 	public static async Task<SessionResponse> RefreshSessionAsync(Uri pdsUrl, string refreshJwt) {
-		Uri refreshEndpoint = new Uri(pdsUrl, "xrpc/com.atproto.server.refreshSession");
+		Uri refreshEndpoint = new(pdsUrl, "xrpc/com.atproto.server.refreshSession");
 
 		using var request = new HttpRequestMessage(HttpMethod.Post, refreshEndpoint);
 		request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshJwt);
@@ -146,7 +146,7 @@ public class BlueskyClient {
 	}
 
 	public static async Task<BlobData> UploadBlobAsync(Uri pdsUrl, string token, string localFilePath, int maxBytes) {
-		Uri uploadEndpoint = new Uri(pdsUrl, "xrpc/com.atproto.repo.uploadBlob");
+		Uri uploadEndpoint = new(pdsUrl, "xrpc/com.atproto.repo.uploadBlob");
 		using var request = new HttpRequestMessage(HttpMethod.Post, uploadEndpoint);
 		request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
@@ -267,7 +267,7 @@ public class BlueskyClient {
 	}
 
 	public static async Task<CreateRecordResponse> CreatePostWithImageAsync(Uri pdsUrl, string token, string did, string text, string altText, BlobData uploadedBlob) {
-		Uri recordEndpoint = new Uri(pdsUrl, "xrpc/com.atproto.repo.createRecord");
+		Uri recordEndpoint = new(pdsUrl, "xrpc/com.atproto.repo.createRecord");
 
 		var record = new Dictionary<string, object> {
 			{ "$type", "app.bsky.feed.post" },
@@ -319,7 +319,7 @@ public class BlueskyClient {
 		string cardTitle,
 		string cardDescription,
 		BlobData thumbBlob) {
-		Uri recordEndpoint = new Uri(pdsUrl, "xrpc/com.atproto.repo.createRecord");
+		Uri recordEndpoint = new(pdsUrl, "xrpc/com.atproto.repo.createRecord");
 
 		var record = new Dictionary<string, object> {
 			{ "$type", "app.bsky.feed.post" },
