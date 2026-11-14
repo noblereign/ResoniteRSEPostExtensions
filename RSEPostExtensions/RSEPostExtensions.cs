@@ -54,13 +54,13 @@ public partial class RSEPostExtensions : ResoniteMod {
 	public static readonly ModConfigurationKey<string> MisskeyFolderName = new("Misskey Folder Name", "What should the photos folder in the Misskey Drive be called?", () => "Resonite");
 
 	[AutoRegisterConfigKey]
-	public static readonly ModConfigurationKey<string> MisskeyPostBody = new("Misskey Post Body", "What should be written by default when sharing from Misskey?\n\nAvailable tokens:\n<Location>\n<Host>\n<WorldName>\n<WorldOwner>\n<WorldLink:OptionalText>\n<Photographer>\n<Time>\n<AppVersion>\n<RendererName>\n<CameraManufacturer>\n<CameraModel>\n<CameraFOV>", () => "#Resonite");
+	public static readonly ModConfigurationKey<string> MisskeyPostBody = new("Misskey Post Body", "What should be written by default when sharing from Misskey?\n\nAvailable tokens:\n<Location>\n<Host>\n<WorldName>\n<WorldOwner>\n<WorldLink:OptionalText>\n<Photographer>\n<Time>\n<AppVersion>\n<RendererName>\n<CameraManufacturer>\n<CameraModel>\n<CameraFOV> (+ camelCase variant)\n<MediaType> (+ camelCase variant)", () => "#Resonite");
 
 	[AutoRegisterConfigKey]
 	public static readonly ModConfigurationKey<string> BlueskyLogins = new("Bluesky logins", "Comma-seperated list of Bluesky identities and app passwords.\n\n<b>Always</b> use an app password!\n\nFormat entries like this:\n<color=hero.yellow>your.handle.here</color>?<color=hero.purple><app password></color>", () => "");
 
 	[AutoRegisterConfigKey]
-	public static readonly ModConfigurationKey<string> BlueskyPostBody = new("Bluesky Post Body", "What should be written by default when sharing from Bluesky?\n\n<color=hero.red>Note that Bluesky has a <b>300 character limit.</b></color>\n\nAvailable tokens:\n<Location>\n<Host>\n<WorldName>\n<WorldOwner>\n<WorldLink:OptionalText>\n<Photographer>\n<Time>\n<AppVersion>\n<RendererName>\n<CameraManufacturer>\n<CameraModel>\n<CameraFOV>", () => "#Resonite");
+	public static readonly ModConfigurationKey<string> BlueskyPostBody = new("Bluesky Post Body", "What should be written by default when sharing from Bluesky?\n\n<color=hero.red>Note that Bluesky has a <b>300 character limit.</b></color>\n\nAvailable tokens:\n<Location>\n<Host>\n<WorldName>\n<WorldOwner>\n<WorldLink:OptionalText>\n<Photographer>\n<Time>\n<AppVersion>\n<RendererName>\n<CameraManufacturer>\n<CameraModel>\n<CameraFOV> (+ camelCase variant)\n<MediaType> (+ camelCase variant)", () => "#Resonite");
 
 	[AutoRegisterConfigKey]
 	public static readonly ModConfigurationKey<bool> BlueskyLinkCard = new("Bluesky link cards", "When sharing to Bluesky, should the post use a link card to the world (if published) instead of an image?\n\n<color=hero.yellow>Note: Compression will be heavier with this feature on.", () => false);
@@ -243,7 +243,10 @@ public partial class RSEPostExtensions : ResoniteMod {
 			.Replace("<RendererName>", Fallback(metadata.RendererName.Value))
 			.Replace("<CameraManufacturer>", Fallback(metadata.CameraManufacturer.Value))
 			.Replace("<CameraModel>", Fallback(metadata.CameraModel.Value))
-			.Replace("<CameraFOV>", (metadata is PhotoMetadata photometa) ? photometa.CameraFOV.Value.ToString("0.##") : "Variable");
+			.Replace("<CameraFOV>", (metadata is PhotoMetadata photometa1) ? photometa1.CameraFOV.Value.ToString("0.##") : "Variable")
+			.Replace("<cameraFOV>", (metadata is PhotoMetadata photometa2) ? photometa2.CameraFOV.Value.ToString("0.##") : "variable")
+			.Replace("<MediaType>", (metadata is PhotoMetadata) ? "Photo" : "Video")
+			.Replace("<mediaType>", (metadata is PhotoMetadata) ? "photo" : "video");
 
 		template = WorldLinkRegex().Replace(template, match => {
 			if (string.IsNullOrEmpty(worldUrl)) {
@@ -600,8 +603,27 @@ public partial class RSEPostExtensions : ResoniteMod {
 		}
 		Msg("Posting to Misskey...");
 
-		var tex = metadata.Slot.GetComponent<StaticTexture2D>();
-		var url = tex?.URL.Value;
+		Uri? url = null;
+		bool isVideo = false;
+
+		switch (metadata) {
+			case PhotoMetadata: {
+					StaticTexture2D? tex = metadata.Slot.GetComponent<StaticTexture2D>();
+					url = tex?.URL.Value;
+					break;
+				}
+			case VideoMetadata:
+				{
+					VideoPlayerInterface? playerInterface = metadata.Slot.GetComponent<VideoPlayerInterface>();
+					if (playerInterface is null || playerInterface.URL.Target is null) break;
+					url = playerInterface.URL.Target.Value;
+					isVideo = true;
+					break;
+				}
+			default:
+				break;
+		}
+
 		if (url is null) return (null, null);
 
 		(string worldName, string worldOwner, Uri? worldUri) = await Util.GetWorldDetailsFromMetadataAsync(metadata);
@@ -630,7 +652,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 			fileName = $"{fileName}{Path.GetExtension(tmpPath)}";
 
-			MisskeyDriveClient.DriveFile? file = await MisskeyDriveClient.UploadFileAsync(instanceUrl, accessToken, tmpPath, folderId, fileName, altText);
+			MisskeyDriveClient.DriveFile? file = await MisskeyDriveClient.UploadFileAsync(instanceUrl, accessToken, tmpPath, isVideo, folderId, fileName, altText);
 
 			Msg($"Upload finished!");
 			return (file?.Id, postBodyText);
@@ -982,8 +1004,27 @@ public partial class RSEPostExtensions : ResoniteMod {
 			return (null, null);
 		}
 
-		var tex = metadata.Slot.GetComponent<StaticTexture2D>();
-		var url = tex?.URL.Value;
+
+		Uri? url = null;
+		bool isVideo = false;
+
+		switch (metadata) {
+			case PhotoMetadata: {
+					StaticTexture2D? tex = metadata.Slot.GetComponent<StaticTexture2D>();
+					url = tex?.URL.Value;
+					break;
+				}
+			case VideoMetadata: {
+					VideoPlayerInterface? playerInterface = metadata.Slot.GetComponent<VideoPlayerInterface>();
+					if (playerInterface is null || playerInterface.URL.Target is null) break;
+					url = playerInterface.URL.Target.Value;
+					isVideo = true;
+					break;
+				}
+			default:
+				break;
+		}
+
 		if (url is null) return (null, null);
 
 		await new ToBackground();
@@ -1019,7 +1060,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 			bool useLinkCard = Config!.GetValue(BlueskyLinkCard);
 
-			Uri postUri = await bskyManager.UploadAndPostPhotoAsync(handle, tmpPath, postBodyText, altText, worldUrl, cardTitle, cardDesc, useLinkCard);
+			Uri postUri = await bskyManager.UploadAndPostMediaAsync(handle, tmpPath, isVideo, postBodyText, altText, worldUrl, cardTitle, cardDesc, useLinkCard);
 
 			Msg($"Bluesky upload finished!");
 			return (postUri, null);

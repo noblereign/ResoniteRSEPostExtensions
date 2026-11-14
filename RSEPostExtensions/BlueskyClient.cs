@@ -1,10 +1,13 @@
 ﻿using System.Collections.Concurrent;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+
 using SixLabors.ImageSharp.Processing;
 
+using static Elements.Core.FileUtil;
 using static RSEPostExtensions.BlueskyClient;
 
 namespace RSEPostExtensions;
@@ -37,6 +40,24 @@ public partial class BlueskyClient {
 	public record CreateRecordResponse(
 		[property: JsonPropertyName("uri")] string Uri,
 		[property: JsonPropertyName("cid")] string Cid
+	);
+
+	public sealed record ServiceAuthResponse(
+	[property: JsonPropertyName("token")] string Token
+);
+
+	public sealed record VideoJobStatusResponse(
+		[property: JsonPropertyName("jobStatus")] VideoJobStatus JobStatus
+	);
+
+	public sealed record VideoJobStatus(
+		[property: JsonPropertyName("jobId")] string JobId,
+		[property: JsonPropertyName("did")] string Did,
+		[property: JsonPropertyName("state")] string State,
+		[property: JsonPropertyName("progress")] int? Progress,
+		[property: JsonPropertyName("blob")] BlobData? Blob,
+		[property: JsonPropertyName("error")] string? Error,
+		[property: JsonPropertyName("message")] string? Message
 	);
 
 	public static async Task<Uri> DiscoverPdsAsync(string identifier) {
@@ -151,6 +172,83 @@ public partial class BlueskyClient {
 
 		var result = await response.Content.ReadFromJsonAsync<BlobResponse>();
 		return result!.Blob;
+	}
+
+	private static readonly Uri VideoServiceBaseUri = new("https://video.bsky.app/");
+
+	public static async Task<(BlobData, (int, int) resolution)> UploadVideoAsync(
+		Uri pdsUrl,
+		string token,
+		string did,
+		string filePath,
+		CancellationToken cancellationToken = default) {
+
+		(string compressedVideoPath, bool autoDelete, (int, int) resolution) = await Util.CompressVideoAsync(filePath, 299, 96, true, cancellationToken);
+		try {
+			using (FileStream fileStream = File.OpenRead(compressedVideoPath)) {
+				(string mimeType, string extension) = Util.GuessVideoMimeType(fileStream);
+
+				long exp = DateTimeOffset.UtcNow.AddMinutes(30).ToUnixTimeSeconds();
+				string audience = Uri.EscapeDataString($"did:web:{pdsUrl.Host}");
+				Uri authEndpoint = new(pdsUrl, $"xrpc/com.atproto.server.getServiceAuth?aud={audience}&lxm=com.atproto.repo.uploadBlob&exp={exp}");
+
+				using var authRequest = new HttpRequestMessage(HttpMethod.Get, authEndpoint);
+				authRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+				using var authResponse = await _http.SendAsync(authRequest, cancellationToken);
+				await EnsureSuccessWithBodyAsync(authResponse);
+
+				var authResult = (await authResponse.Content.ReadFromJsonAsync<ServiceAuthResponse>(cancellationToken))!;
+
+				string encodedDid = Uri.EscapeDataString(did);
+				string encodedName = Uri.EscapeDataString($"video{extension}");
+				Uri uploadEndpoint = new(VideoServiceBaseUri, $"xrpc/app.bsky.video.uploadVideo?did={encodedDid}&name={encodedName}");
+
+				using var uploadRequest = new HttpRequestMessage(HttpMethod.Post, uploadEndpoint);
+				uploadRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", authResult.Token);
+
+				var streamContent = new StreamContent(fileStream);
+				streamContent.Headers.ContentType = new MediaTypeHeaderValue(mimeType);
+				if (fileStream.CanSeek) {
+					streamContent.Headers.ContentLength = fileStream.Length - fileStream.Position;
+				}
+				uploadRequest.Content = streamContent;
+
+				using var uploadResponse = await _http.SendAsync(uploadRequest, cancellationToken);
+
+				VideoJobStatus? status = null;
+				if (uploadResponse.IsSuccessStatusCode || uploadResponse.StatusCode == HttpStatusCode.Conflict) {
+					status = await uploadResponse.Content.ReadFromJsonAsync<VideoJobStatus>(cancellationToken);
+				}
+
+				if (status is null) {
+					await EnsureSuccessWithBodyAsync(uploadResponse);
+					throw new InvalidOperationException("Video upload returned an empty job status.");
+				}
+
+				Uri statusEndpoint = new(VideoServiceBaseUri, $"xrpc/app.bsky.video.getJobStatus?jobId={Uri.EscapeDataString(status.JobId)}");
+
+				while (status.Blob is null) {
+					if (status.State == "JOB_STATE_FAILED") {
+						throw new InvalidOperationException($"Bluesky video processing failed ({status.Error}): {status.Message}");
+					}
+
+					await Task.Delay(1000, cancellationToken);
+
+					using var statusResponse = await _http.GetAsync(statusEndpoint, cancellationToken);
+					await EnsureSuccessWithBodyAsync(statusResponse);
+
+					var wrapper = (await statusResponse.Content.ReadFromJsonAsync<VideoJobStatusResponse>(cancellationToken))!;
+					status = wrapper.JobStatus;
+				}
+
+				return (status.Blob, resolution);
+			}
+		} finally {
+			if (autoDelete && File.Exists(compressedVideoPath)) {
+				try { File.Delete(compressedVideoPath); } catch { }
+			}
+		}
 	}
 
 	private static async Task<(string cleanText, List<Dictionary<string, object>> facets)> ParseFacetsAsync(string text) {
@@ -301,6 +399,51 @@ public partial class BlueskyClient {
 		return (await response.Content.ReadFromJsonAsync<CreateRecordResponse>())!;
 	}
 
+	public static async Task<CreateRecordResponse> CreatePostWithVideoAsync(Uri pdsUrl, string token, string did, string text, string altText, BlobData uploadedBlob, (int width, int height) resolution) {
+		Uri recordEndpoint = new(pdsUrl, "xrpc/com.atproto.repo.createRecord");
+
+		var record = new Dictionary<string, object> {
+			{ "$type", "app.bsky.feed.post" },
+			{ "text", text },
+			{ "createdAt", DateTime.UtcNow.ToString("O") },
+			{ "embed", new Dictionary<string, object> {
+				{ "$type", "app.bsky.embed.video" },
+				{ "video", uploadedBlob },
+				{ "presentation", "default" },
+				{ "alt", altText },
+				{ "aspectRatio", new Dictionary<string, int> {
+					{ "width", resolution.width },
+					{ "height", resolution.height }
+				}}
+			}}
+		};
+
+		var (cleanText, facets) = await ParseFacetsAsync(text);
+
+		record["text"] = cleanText;
+
+		if (facets.Count > 0) {
+			record["facets"] = facets;
+		}
+
+		var payload = new {
+			repo = did,
+			collection = "app.bsky.feed.post",
+			record
+		};
+
+		using var request = new HttpRequestMessage(HttpMethod.Post, recordEndpoint);
+		request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+		string jsonPayload = JsonSerializer.Serialize(payload);
+		request.Content = new StringContent(jsonPayload, System.Text.Encoding.UTF8, "application/json");
+
+		using var response = await _http.SendAsync(request);
+		await EnsureSuccessWithBodyAsync(response);
+
+		return (await response.Content.ReadFromJsonAsync<CreateRecordResponse>())!;
+	}
+
 	public static async Task<CreateRecordResponse> CreatePostWithExternalCardAsync(
 		Uri pdsUrl,
 		string token,
@@ -395,7 +538,7 @@ public class BlueskySessionManager {
 		}
 	}
 
-	public async Task<Uri> UploadAndPostPhotoAsync(string identifier, string localPath, string text, string altText, string? worldUrl, string cardTitle, string cardDescription, bool useLinkCard) {
+	public async Task<Uri> UploadAndPostMediaAsync(string identifier, string localPath, bool isVideo, string text, string altText, string? worldUrl, string cardTitle, string cardDescription, bool useLinkCard) {
 		string normalizedId = identifier.TrimStart('@');
 
 		if (!_sessions.TryGetValue(normalizedId, out var session) || string.IsNullOrEmpty(session.AccessJwt)) {
@@ -403,7 +546,7 @@ public class BlueskySessionManager {
 		}
 
 		try {
-			return await ExecutePostLogicAsync(session, localPath, text, altText, worldUrl, cardTitle, cardDescription, useLinkCard);
+			return await ExecutePostLogicAsync(session, localPath, isVideo, text, altText, worldUrl, cardTitle, cardDescription, useLinkCard);
 		} catch (HttpRequestException ex) when (ex.Message.Contains("401") || ex.Message.Contains("ExpiredToken")) {
 			var newTokens = await RefreshSessionAsync(session.PdsUrl, session.RefreshJwt);
 
@@ -411,24 +554,33 @@ public class BlueskySessionManager {
 			session.AccessJwt = newTokens.AccessJwt;
 			session.RefreshJwt = newTokens.RefreshJwt;
 
-			return await ExecutePostLogicAsync(session, localPath, text, altText, worldUrl, cardTitle, cardDescription, useLinkCard);
+			return await ExecutePostLogicAsync(session, localPath, isVideo, text, altText, worldUrl, cardTitle, cardDescription, useLinkCard);
 		}
 	}
 
-	private static async Task<Uri> ExecutePostLogicAsync(BlueskySessionState session, string localPath, string text, string altText, string? worldUrl, string cardTitle, string cardDescription, bool useLinkCard) {
+	private static async Task<Uri> ExecutePostLogicAsync(BlueskySessionState session, string localPath, bool isVideo, string text, string altText, string? worldUrl, string cardTitle, string cardDescription, bool useLinkCard) {
 		int targetBytes = useLinkCard ? 950000 : 1900000;
-		var blob = await UploadBlobAsync(session.PdsUrl, session.AccessJwt, localPath, targetBytes);
+		
+		BlobData? blob;
+		(int, int)? resolution = null;
+		if (isVideo) {
+			(blob, resolution) = await UploadVideoAsync(session.PdsUrl, session.AccessJwt, session.Did, localPath);
+		} else {
+			blob = await UploadBlobAsync(session.PdsUrl, session.AccessJwt, localPath, targetBytes);
+		}
 
 		CreateRecordResponse record;
 
-		if (useLinkCard && !string.IsNullOrEmpty(worldUrl)) {
+		if (useLinkCard && !isVideo && !string.IsNullOrEmpty(worldUrl)) {
 			record = await CreatePostWithExternalCardAsync(session.PdsUrl, session.AccessJwt, session.Did, text, worldUrl, cardTitle, cardDescription, blob);
 		}
-		else {
+		else if (isVideo) {
+			record = await CreatePostWithVideoAsync(session.PdsUrl, session.AccessJwt, session.Did, text, altText, blob, resolution ?? (128, 128));
+		} else {
 			record = await CreatePostWithImageAsync(session.PdsUrl, session.AccessJwt, session.Did, text, altText, blob);
 		}
 
-		string[] parts = record.Uri.Replace("at://", "").Split('/');
+			string[] parts = record.Uri.Replace("at://", "").Split('/');
 		if (parts.Length >= 3) {
 			return new Uri($"https://bsky.app/profile/{parts[0]}/post/{parts[2]}");
 		}

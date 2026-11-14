@@ -49,7 +49,7 @@ public class DiscordClient {
 		string escapedAltText = JsonConvert.ToString(altText);
 		string fieldsJson = string.Join(", ", fields.Select(f => f.ToJson()));
 
-		(string compressedVideoPath, bool autoDelete) = await Util.CompressVideoAsync(filePath);
+		(string compressedVideoPath, bool autoDelete, (int, int) resolution) = await Util.CompressVideoAsync(filePath);
 
 		try {
 			using (FileStream fileStream = File.OpenRead(compressedVideoPath)) {

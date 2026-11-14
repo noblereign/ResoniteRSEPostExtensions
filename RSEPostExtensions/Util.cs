@@ -257,7 +257,27 @@ internal class Util {
 			string.Equals(c.Name, codecName, StringComparison.OrdinalIgnoreCase));
 	}
 
-	public static async Task<(string outputPath, bool wasCompressed)> CompressVideoAsync(
+	private static (int Width, int Height) GetVideoResolution(IMediaAnalysis mediaInfo) {
+		var stream = mediaInfo.PrimaryVideoStream ?? mediaInfo.VideoStreams.FirstOrDefault();
+		if (stream is null)
+			return (128, 128);
+
+		int width = stream.Width;
+		int height = stream.Height;
+
+		if (width <= 0 || height <= 0)
+			(width, height) = stream.DisplayAspectRatio;
+
+		if (width <= 0 || height <= 0)
+			return (128, 128);
+
+		if (Math.Abs(stream.Rotation) % 180 == 90)
+			return (height, width);
+
+		return (width, height);
+	}
+
+	public static async Task<(string outputPath, bool wasCompressed, (int, int) resolution)> CompressVideoAsync(
 	string inputPath,
 	double targetMiB = 19,
 	int audioKbps = 96,
@@ -266,12 +286,12 @@ internal class Util {
 		long maxBytes = (long)(targetMiB * 1024 * 1024);
 		var inputInfo = new FileInfo(inputPath);
 
-		if (!fixColorRange && inputInfo.Length <= maxBytes) {
-			return (inputPath, false);
-		}
-
 		IMediaAnalysis mediaInfo = await FFProbe.AnalyseAsync(inputPath, cancellationToken: ct).ConfigureAwait(false);
 		double durationSeconds = mediaInfo.Duration.TotalSeconds;
+
+		if (!fixColorRange && inputInfo.Length <= maxBytes) {
+			return (inputPath, false, GetVideoResolution(mediaInfo));
+		}
 
 		if (durationSeconds <= 0.1)
 			throw new InvalidOperationException("Invalid video duration");
@@ -309,7 +329,8 @@ internal class Util {
 				await EncodeSinglePassAsync(inputPath, tempOutputPath, encoder, videoKbps, audioKbps, targetHeight, fixColorRange, ct).ConfigureAwait(false);
 			}
 
-			return (tempOutputPath, true);
+			IMediaAnalysis finalMediaInfo = await FFProbe.AnalyseAsync(tempOutputPath, cancellationToken: ct).ConfigureAwait(false);
+			return (tempOutputPath, true, GetVideoResolution(finalMediaInfo));
 		} catch {
 			if (File.Exists(tempOutputPath)) {
 				try { File.Delete(tempOutputPath); } catch { }

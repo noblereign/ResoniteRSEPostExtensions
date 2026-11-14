@@ -83,6 +83,7 @@ public class MisskeyDriveClient {
 		Uri instanceUrl,
 		string token,
 		string localFilePath,
+		bool isVideo,
 		string? folderId = null,
 		string? name = null,
 		string? comment = null,
@@ -100,7 +101,7 @@ public class MisskeyDriveClient {
 		var fileStream = File.OpenRead(localFilePath);
 		var fileContent = new StreamContent(fileStream);
 
-		(string mimeType, string ext) = Util.GuessImageMimeType(fileStream);
+		(string mimeType, string ext) = isVideo ? Util.GuessVideoMimeType(fileStream) : Util.GuessImageMimeType(fileStream);
 		fileStream.Position = 0;
 
 		fileContent.Headers.ContentType = new MediaTypeHeaderValue(mimeType);
