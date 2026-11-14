@@ -5,9 +5,6 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-using SixLabors.ImageSharp.Processing;
-
-using static Elements.Core.FileUtil;
 using static RSEPostExtensions.BlueskyClient;
 using static RSEPostExtensions.RSEPostExtensions;
 using static RSEPostExtensions.Util;

@@ -1,14 +1,11 @@
 ﻿using System.Collections.Concurrent;
-using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
-
-using Elements.Core;
-
-using FrooxEngine;
-
+using System.Text.Json;
 using Newtonsoft.Json;
 
+using Elements.Core;
+using FrooxEngine;
 using ResoniteModLoader;
 
 using static ResoniteScreenshotExtensions.DiscordWebhookClient;
@@ -37,12 +34,12 @@ public class DiscordClient {
 		return builder.Uri;
 	}
 
-	private static async Task<Uri?> BuildDiscordMessageUrlAsync(
+	private static async Task<Uri?> BuildWebhookMessageUrlAsync(
 		string responseBody,
 		Uri webhookUrl,
 		HttpClient client,
 		CancellationToken ct = default) {
-		using var messageDoc = System.Text.Json.JsonDocument.Parse(responseBody);
+		using var messageDoc = JsonDocument.Parse(responseBody);
 		var root = messageDoc.RootElement;
 
 		string? messageId = root.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
@@ -69,10 +66,10 @@ public class DiscordClient {
 		}
 
 		string guildSegment = string.IsNullOrEmpty(guildId) ? "@me" : guildId;
-		return new Uri($"https://discord.com/channels/{guildSegment}/{channelId}/{messageId}");
+		return new Uri($"{webhookUrl.GetLeftPart(UriPartial.Authority)}/channels/{guildSegment}/{channelId}/{messageId}");
 	}
 
-	public static async Task<Uri?> PostVideoToDiscord(VideoMetadata metadata, string filePath, string altText, Uri webhookUrl, IProgress<CompressionProgress>? progress = null) {
+	public static async Task<Uri?> PostVideoToDiscord(VideoMetadata metadata, string filePath, string altText, Uri webhookUrl, WebhookInfo serviceInfo, IProgress<CompressionProgress>? progress = null) {
 		progress?.Report(new CompressionProgress(1.0, "Gathering metadata"));
 		ModConfiguration? RSEConfig = ModLoader.Mods().FirstOrDefault(m => m.Name == "ResoniteScreenshotExtensions")?.GetConfiguration();
 		if (RSEConfig == null) return null;
@@ -108,7 +105,7 @@ public class DiscordClient {
 		string escapedAltText = JsonConvert.ToString(altText);
 		string fieldsJson = string.Join(", ", fields.Select(f => f.ToJson()));
 
-		(string compressedVideoPath, bool autoDelete, (int, int) resolution) = await Util.CompressVideoAsync(filePath, 19, 96, true, progress);
+		(string compressedVideoPath, bool autoDelete, (int, int) resolution) = await Util.CompressVideoAsync(filePath, serviceInfo.MaxSizeMiB - 1f, 96, true, progress);
 
 		progress?.Report(new CompressionProgress(1.0, "Reading compressed file..."));
 
@@ -156,11 +153,11 @@ public class DiscordClient {
 		string responseBody = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
 
 		if (!response.IsSuccessStatusCode) {
-			RSEPostExtensions.Warn($"Failed to post video to Discord: {response.StatusCode} {responseBody}");
+			RSEPostExtensions.Warn($"Failed to post video with webhook: {response.StatusCode} {responseBody}");
 			return null;
 		}
 
-		return await BuildDiscordMessageUrlAsync(responseBody, webhookUrl, _client, ct).ConfigureAwait(false);
+		return await BuildWebhookMessageUrlAsync(responseBody, webhookUrl, _client, ct).ConfigureAwait(false);
 	}
 
 	public static async Task<Uri?> PostToDiscordWithAltText(
@@ -205,11 +202,11 @@ public class DiscordClient {
 		string responseBody = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
 
 		if (!response.IsSuccessStatusCode) {
-			RSEPostExtensions.Warn($"Failed to post image to Discord: {response.StatusCode} {responseBody}");
-			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post image to Discord, check log", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
+			RSEPostExtensions.Warn($"Failed to post image with webhook: {response.StatusCode} {responseBody}");
+			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post image with webhook, check log", RadiantUI_Constants.Hero.RED, RSEPostExtensions.NOTIF_DISTANCE, 5f, floatUpDistance: RSEPostExtensions.NOTIF_FLOATUP);
 			return null;
 		}
 
-		return await BuildDiscordMessageUrlAsync(responseBody, baseUri, client, ct).ConfigureAwait(false);
+		return await BuildWebhookMessageUrlAsync(responseBody, baseUri, client, ct).ConfigureAwait(false);
 	}
 }

@@ -1,18 +1,12 @@
-﻿using System;
-using System.Buffers.Text;
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Net;
-using System.Net.Http.Headers;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Web;
 
 using Elements.Core;
-
 using FrooxEngine;
-
 using HarmonyLib;
-
 using ResoniteModLoader;
 
 using static RSEPostExtensions.Util;
@@ -54,7 +48,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 	public static readonly ModConfigurationKey<string> UnpublishedWorldFallback = new("Text Fallback for Unpublished Worlds", "If a world isn't published, what should the 'WorldLink' token be replaced by?", () => "🔐 World Not Published");
 
 	[AutoRegisterConfigKey]
-	public static readonly ModConfigurationKey<string> DiscordURLs = new("Discord URLs", "Comma-seperated list of Discord webhook urls.\n\nYou can nickname them with a 'query parameter', e.g.\n'https://discord.com/api/webhooks/1234/key<color=hero.yellow>?<LABEL GOES HERE></color>'", () => "");
+	public static readonly ModConfigurationKey<string> DiscordURLs = new("Webhook URLs", "Comma-seperated list of Discord-compatible webhook urls.\n\nYou can nickname them with a 'query parameter', e.g.\n'https://discord.com/api/webhooks/1234/key<color=hero.yellow>?<LABEL GOES HERE></color>'", () => "");
 
 	[AutoRegisterConfigKey]
 	public static readonly ModConfigurationKey<string> MisskeyURLs = new("Misskey access tokens", "Comma-seperated list of Misskey URLs and access tokens.\n\nThe access token should only have the <b>'Access your Drive files and folders'</b> and <b>'Edit or delete your Drive files and folders'</b> permissions.\n\nFormat entries like this:\n<color=hero.yellow>https://example.com</color>?<color=hero.purple><token></color>", () => "");
@@ -81,7 +75,12 @@ public partial class RSEPostExtensions : ResoniteMod {
 	static readonly Uri FEDIVERSE_URI = new("resdb:///87b9aee416b10948cab768e3ada9f5537d453f78971d6537ab4ad818e90a5daf.webp");
 	static readonly Uri GALLEVR_URI = new("resdb:///33070a028930ac3e520443134d5afd04bfcc57dc7a2b17e612147c52ca0f73c7.png");
 	static readonly Uri BLUESKY_URI = new("resdb:///ea11f4de18ccdf349bb0b896d24244adcb048979b1705cd82c851d1299792fcc.png");
+	static readonly Uri FLUXER_URI = new("resdb:///c3ab921b78d9c0395e674a936c242054914cdce4dfe72157ad923a91d5f33736.png");
+	static readonly Uri WEBHOOK_URI = new("resdb:///9a8ef06b235f8596ba7a9b2538ac0181f2bf152964c77cff13136407f771b613.png");
 	static readonly Uri ERROR_URI = new("resdb:///92a0b1cf9536b1e675e3e1c4db52133c5dc0596d128d7bb91582ce75bfb6a9da");
+
+	public static readonly float NOTIF_DISTANCE = 0.5f;
+	public static readonly float NOTIF_FLOATUP = 0.1f;
 
 	const string MENU_ITEM_TAG = "RSE_POST_TO_DISCORD";
 
@@ -100,6 +99,14 @@ public partial class RSEPostExtensions : ResoniteMod {
 		IProgress<CompressionProgress>? Progress,
 		TaskCompletionSource<Uri?> CompletionSource
 	);
+
+	public sealed record WebhookInfo(
+		string ServiceName,
+		Uri IconUri,
+		colorX Color,
+		float MaxSizeMiB
+	);
+
 	public sealed class ProgressiveStreamContent(Stream stream, Action<long, long> onProgress, int bufferSize = 81920) : HttpContent {
 		private readonly Stream _stream = stream;
 		private readonly int _bufferSize = bufferSize;
@@ -215,14 +222,23 @@ public partial class RSEPostExtensions : ResoniteMod {
 			string baseUrl = urlParts[0];
 			string webhookName = urlParts.Length > 1 ? urlParts[1] : $"#{webhookCount}<alpha=#77><size=75%> aka </alpha></size>{Util.GetMemorableName(baseUrl)}";
 
-			ContextMenuItem menuItem = menu.AddItem(webhookName, RSE.PhotoMetadata_Patch.DISCORD_ICON_URI, null);
+			Uri webhookUrl = new(baseUrl);
+			WebhookInfo serviceInfo = webhookUrl.Host switch {
+				{ } host when host.Contains("Discord", StringComparison.OrdinalIgnoreCase) => new("Discord", RSE.PhotoMetadata_Patch.DISCORD_ICON_URI, colorX.FromHexCode("#5865F2"), 20f),
+				{ } host when host.Contains("Fluxer", StringComparison.OrdinalIgnoreCase) => new("Fluxer", FLUXER_URI, colorX.FromHexCode("#4641D9"), 25f),
+				_ => new("Webhook", WEBHOOK_URI, colorX.White, 20f)
+			};
+			Msg(serviceInfo.ServiceName);
+
+			ContextMenuItem menuItem = menu.AddItem(webhookName, serviceInfo.IconUri, serviceInfo.Color);
 
 			bool isConfirming = false;
 			bool isUploaded = false;
 
 			menuItem.Button.LocalPressed += async (button, eventData) => {
 				if (!menuItem.Button.Enabled) return;
-
+				if (isUploaded) return;
+				menuItem.Color.Value = serviceInfo.Color;
 				if (Config!.GetValue(DoubleClickConfirm) && !isConfirming) {
 					isConfirming = true;
 					menuItem.Label.Target.Value = $"<color=hero.red>Really post to </color><b>{webhookName}</b>?";
@@ -230,7 +246,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 					menuItem.RunInSeconds(3f, () => {
 						if (isConfirming) {
 							isConfirming = false;
-							if (menuItem != null && !menuItem.IsRemoved && menuItem.Button.Enabled) {
+							if (menuItem != null && !menuItem.IsRemoved && menuItem.Button.Enabled && !isUploaded) {
 								menuItem.Label.Target.Value = webhookName;
 							}
 						}
@@ -264,16 +280,17 @@ public partial class RSEPostExtensions : ResoniteMod {
 					});
 				});
 
-				Uri? postUrl = await PostToDiscord(metadata, new Uri(baseUrl), progress);
+				Uri? postUrl = await PostToDiscord(metadata, new Uri(baseUrl), serviceInfo, progress);
 				if (menuItem != null && !menuItem.IsDisposed && !menuItem.IsDestroyed && !menuItem.IsRemoved && menuItem.IsValid
 				&& menuItem.Slot != null && !menuItem.Slot.IsDisposed && !menuItem.Slot.IsDestroyed && !menuItem.Slot.IsRemoved && menuItem.Slot.IsActive) {
 					menuItem.RunSynchronously(() => {
 						if (postUrl != null) {
 							isUploaded = true;
+							menuItem.Color.Value = RadiantUI_Constants.Hero.GREEN;
 							menuItem.Label.Target.Value = $"Sent to {webhookName}\n<size=60%><color=#bcbcbc>Click to view message</color></size>";
 							Hyperlink linkComponent = menuItem.Slot.AttachComponent<Hyperlink>();
 							linkComponent.URL.Value = postUrl;
-							linkComponent.Reason.Value = $"View your Discord message";
+							linkComponent.Reason.Value = $"View your {serviceInfo.ServiceName} message";
 							menuItem.Button.Enabled = true;
 						} else {
 							menuItem.Label.Target.Value = $"<color=hero.red>Post Failed</color>\n<size=60%><color=#bcbcbc>Click to try again</color></size>";
@@ -281,7 +298,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 						}
 					});
 				} else {
-					NotificationMessage.SpawnTextMessage("Video was posted to Discord", RadiantUI_Constants.Hero.GREEN, 0.3f, 2.5f);
+					NotificationMessage.SpawnTextMessage($"Media was posted to {serviceInfo.ServiceName}", RadiantUI_Constants.Hero.GREEN, NOTIF_DISTANCE, 2.5f, floatUpDistance: NOTIF_FLOATUP);
 				}
 			};
 		}
@@ -660,9 +677,9 @@ public partial class RSEPostExtensions : ResoniteMod {
 					});
 				} else {
 					if (fileId != null) {
-						NotificationMessage.SpawnTextMessage($"Uploaded to {currentInstanceName} successfully!", RadiantUI_Constants.Hero.GREEN, 0.3f, 2.5f);
+						NotificationMessage.SpawnTextMessage($"Uploaded to {currentInstanceName} successfully!", RadiantUI_Constants.Hero.GREEN, NOTIF_DISTANCE, 2.5f, floatUpDistance: NOTIF_FLOATUP);
 					} else {
-						NotificationMessage.SpawnTextMessage($"Failed to upload to {currentInstanceName}!", RadiantUI_Constants.Hero.RED, 0.3f, 2.5f);
+						NotificationMessage.SpawnTextMessage($"Failed to upload to {currentInstanceName}!", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 2.5f, floatUpDistance: NOTIF_FLOATUP);
 					}
 				}
 			};
@@ -775,7 +792,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 		} catch (Exception ex) {
 			Warn($"Misskey upload failed: {ex.Message}");
 
-			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to Misskey!", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
+			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to Misskey!", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 5f, floatUpDistance: NOTIF_FLOATUP);
 
 			return (null, null);
 		}
@@ -907,9 +924,9 @@ public partial class RSEPostExtensions : ResoniteMod {
 				});
 			} else {
 				if (uploadResult != null) {
-					NotificationMessage.SpawnTextMessage($"Uploaded to GalleVR successfully!", RadiantUI_Constants.Hero.GREEN, 0.3f, 2.5f);
+					NotificationMessage.SpawnTextMessage($"Uploaded to GalleVR successfully!", RadiantUI_Constants.Hero.GREEN, NOTIF_DISTANCE, 2.5f, floatUpDistance: NOTIF_FLOATUP);
 				} else {
-					NotificationMessage.SpawnTextMessage($"Failed to upload to GalleVR!", RadiantUI_Constants.Hero.RED, 0.3f, 2.5f);
+					NotificationMessage.SpawnTextMessage($"Failed to upload to GalleVR!", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 2.5f, floatUpDistance: NOTIF_FLOATUP);
 				}
 			}
 		};
@@ -1024,7 +1041,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 		} catch (Exception ex) {
 			Warn($"GalleVR upload failed: {ex.Message}");
 
-			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to GalleVR!", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
+			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to GalleVR!", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 5f, floatUpDistance: NOTIF_FLOATUP);
 
 			return null;
 		}
@@ -1156,12 +1173,12 @@ public partial class RSEPostExtensions : ResoniteMod {
 					});
 				} else {
 					if (postUrl != null) {
-						NotificationMessage.SpawnTextMessage($"Posted to Bluesky successfully!", RadiantUI_Constants.Hero.GREEN, 0.3f, 2.5f);
+						NotificationMessage.SpawnTextMessage($"Posted to Bluesky successfully!", RadiantUI_Constants.Hero.GREEN, NOTIF_DISTANCE, 2.5f, floatUpDistance: NOTIF_FLOATUP);
 					} else {
 						if (currentWarning != null) {
-							NotificationMessage.SpawnTextMessage($"Couldn't post due to warning: {currentWarning}\nRetry the post to continue", RadiantUI_Constants.Hero.ORANGE, 0.3f, 8f);
+							NotificationMessage.SpawnTextMessage($"Couldn't post due to warning: {currentWarning}\nRetry the post to continue", RadiantUI_Constants.Hero.ORANGE, NOTIF_DISTANCE, 8f, floatUpDistance: NOTIF_FLOATUP);
 						} else {
-							NotificationMessage.SpawnTextMessage($"Failed to post to Bluesky!", RadiantUI_Constants.Hero.RED, 0.3f, 2.5f);
+							NotificationMessage.SpawnTextMessage($"Failed to post to Bluesky!", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 2.5f, floatUpDistance: NOTIF_FLOATUP);
 						}
 					}
 				}
@@ -1177,14 +1194,14 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 		try {
 			if (string.IsNullOrWhiteSpace(handle) || string.IsNullOrWhiteSpace(password)) {
-				NotificationMessage.SpawnTextMessage("[RSEPostExtensions] No app password specified!", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
+				NotificationMessage.SpawnTextMessage("[RSEPostExtensions] No app password specified!", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 5f, floatUpDistance: NOTIF_FLOATUP);
 				return (null, null);
 			}
 			progress?.Report(new CompressionProgress(1.0, "Authenticating"));
 			await bskyManager.LoginAsync(handle, password);
 		} catch (Exception ex) {
 			Warn($"Failed to login to Bluesky: {ex.Message}");
-			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Bluesky Login Failed!", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
+			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Bluesky Login Failed!", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 5f, floatUpDistance: NOTIF_FLOATUP);
 			return (null, null);
 		}
 		progress?.Report(new CompressionProgress(1.0, "Gathering metadata"));
@@ -1254,7 +1271,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 			string notifMsg = ex is InvalidOperationException
 				? $"[RSEPostExtensions] {ex.Message}"
 				: "[RSEPostExtensions] Failed to post to Bluesky!";
-			NotificationMessage.SpawnTextMessage(notifMsg, RadiantUI_Constants.Hero.RED, 0.7f, 5f);
+			NotificationMessage.SpawnTextMessage(notifMsg, RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 5f, floatUpDistance: NOTIF_FLOATUP);
 			return (null, null);
 		}
 	}
@@ -1322,7 +1339,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 			}
 		} catch (Exception ex) {
 			RSEPostExtensions.Warn($"Error occurred whilst posting image to Discord!! {ex}");
-			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Error posting image to Discord, check log!!", colorX.Red, 0.7f, 5f);
+			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Error posting image to Discord, check log!!", colorX.Red, NOTIF_DISTANCE, 5f, floatUpDistance: NOTIF_FLOATUP);
 			context.CompletionSource.TrySetResult(null);
 			return false;
 		} finally {
@@ -1330,7 +1347,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 		}
 	}
 
-	static async Task<Uri?> PostToDiscord(CameraMediaMetadataBase metadata, Uri webhookUri, IProgress<CompressionProgress>? progress = null) {
+	static async Task<Uri?> PostToDiscord(CameraMediaMetadataBase metadata, Uri webhookUri, WebhookInfo serviceInfo, IProgress<CompressionProgress>? progress = null) {
 		if (!Config!.GetValue(Multiposting)) {
 			metadata.LocalUser.CloseContextMenu(null!);
 		}
@@ -1349,7 +1366,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 						string? tmpPath = await photoMetadata.Engine.AssetManager.GatherAssetFile(url, 100f);
 						if (tmpPath is null) break;
 
-						Msg("Posting to Discord as photo");
+						Msg("Posting to webhook as photo");
 						var tcs = new TaskCompletionSource<Uri?>(TaskCreationOptions.RunContinuationsAsynchronously);
 						_urlMappings[tmpPath] = new DiscordPostContext(webhookUri, photoMetadata, progress, tcs);
 
@@ -1380,24 +1397,24 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 						string altText = await AltTextFromMetadata(videoMetadata);
 
-						Msg("Posting to Discord as video");
-						return await DiscordClient.PostVideoToDiscord(videoMetadata, tmpPath, altText, webhookUri, progress).ContinueWith(Uri? (t) => {
+						Msg("Posting to webhook as video");
+						return await DiscordClient.PostVideoToDiscord(videoMetadata, tmpPath, altText, webhookUri, serviceInfo, progress).ContinueWith(Uri? (t) => {
 							if (t.IsFaulted) {
-								Warn($"Error occurred whilst posting video to Discord!! {t.Exception}");
-								NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Error posting video to Discord, check log!!", colorX.Red, 0.7f, 5f);
+								Warn($"Error occurred whilst posting video to webhook!! {t.Exception}");
+								NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Error posting video to webhook, check log!!", colorX.Red, NOTIF_DISTANCE, 5f);
 								return null;
 							}
 							if (t.Result == null) {
-								Warn("Failed to post video to Discord");
-								NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post video to Discord, check log", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
+								Warn("Failed to post video to webhook");
+								NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post video to webhook, check log", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 5f);
 								return null;
 							}
 							return t.Result;
 						});
 					}
 				default:
-					Msg("Posting to Discord as.. um.. what kind of file is this");
-					NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Media type currently unsupported :(", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
+					Msg("Posting to webhook as.. um.. what kind of file is this");
+					NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Media type currently unsupported :(", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 5f);
 					return null;
 			}
 			return null;
@@ -1430,7 +1447,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 					return context.WebhookUri.ToString();
 				}
 				Warn("Couldn't find webhook URI mapping!! ABORT!!!");
-				NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to Discord, please try again!", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
+				NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to Discord, please try again!", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 5f);
 				return "";
 			}
 			return configInstance.GetValue(key);
