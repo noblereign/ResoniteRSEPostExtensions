@@ -336,10 +336,12 @@ internal class Util {
 			}
 		}
 
+		string pixFmt = encoder == EncoderChoice.Nvenc ? "nv12" : "yuv420p";
+
 		string vfFilter = (targetHeight.HasValue, fixColorRange) switch {
-			(true, true) => $"scale=-2:{targetHeight!.Value}:in_range=full:out_range=tv,format=yuv420p",
-			(true, false) => $"scale=-2:{targetHeight!.Value},format=yuv420p",
-			(false, true) => "scale=in_range=full:out_range=tv,format=yuv420p",
+			(true, true) => $"scale=-2:{targetHeight!.Value}:in_range=full:out_range=tv,format={pixFmt}",
+			(true, false) => $"scale=-2:{targetHeight!.Value},format={pixFmt}",
+			(false, true) => $"scale=in_range=full:out_range=tv,format={pixFmt}",
 			(false, false) => string.Empty
 		};
 
@@ -362,7 +364,7 @@ internal class Util {
 				}
 
 				if (string.IsNullOrEmpty(vfFilter))
-					options.WithCustomArgument("-pix_fmt yuv420p");
+					options.WithCustomArgument($"-pix_fmt {pixFmt}");
 				else
 					options.WithCustomArgument($"-vf \"{vfFilter}\"");
 
