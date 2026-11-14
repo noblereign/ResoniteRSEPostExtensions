@@ -48,6 +48,9 @@ public partial class RSEPostExtensions : ResoniteMod {
 	public static readonly ModConfigurationKey<string> UnpublishedWorldFallback = new("Text Fallback for Unpublished Worlds", "If a world isn't published, what should the 'WorldLink' token be replaced by?", () => "🔐 World Not Published");
 
 	[AutoRegisterConfigKey]
+	public static readonly ModConfigurationKey<string> LegacyUrls = new("Discord URLs", "Please use Webhook URLs instead.", () => "", true);
+
+	[AutoRegisterConfigKey]
 	public static readonly ModConfigurationKey<string> DiscordURLs = new("Webhook URLs", "Comma-seperated list of Discord-compatible webhook urls.\n\nYou can nickname them with a 'query parameter', e.g.\n'https://discord.com/api/webhooks/1234/key<color=hero.yellow>?<LABEL GOES HERE></color>'", () => "");
 
 	[AutoRegisterConfigKey]
@@ -145,7 +148,9 @@ public partial class RSEPostExtensions : ResoniteMod {
 #endif
 
 		Config = GetConfiguration()!;
+		MigrateLegacyConfig();
 		Config!.Save(true);
+		
 
 		Engine.Current.RunPostInit(() =>
 		{
@@ -178,6 +183,18 @@ public partial class RSEPostExtensions : ResoniteMod {
 	}
 #endif
 
+	private static void MigrateLegacyConfig() {
+		bool newUrlsExist = Config!.TryGetValue(DiscordURLs, out string? newUrlData);
+		if ((!newUrlsExist || string.IsNullOrWhiteSpace(newUrlData)) && Config.TryGetValue(LegacyUrls, out string? legacyValue)) {
+			if (!string.IsNullOrWhiteSpace(legacyValue)) {
+				Msg("Migrating config to new webhook url name");
+				Config.Set(DiscordURLs, legacyValue);
+			}
+
+			Config.Unset(LegacyUrls);
+			Config.Save(true);
+		}
+	}
 
 	public static void PatchRSE() {
 		try {
