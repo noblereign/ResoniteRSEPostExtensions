@@ -1,16 +1,25 @@
-﻿using System.Collections.Concurrent;
+﻿using System;
+using System.Buffers.Text;
+using System.Collections.Concurrent;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Web;
+
 using Elements.Core;
+
 using FrooxEngine;
+
 using HarmonyLib;
+
 using ResoniteModLoader;
+
+using static RSEPostExtensions.Util;
 
 using Metadata = ResoniteScreenshotExtensions.Metadata;
 using RSE = ResoniteScreenshotExtensions.ResoniteScreenshotExtensions;
-
+using Stream = System.IO.Stream;
 
 #if DEBUG
 using ResoniteHotReloadLib;
@@ -76,12 +85,52 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 	const string MENU_ITEM_TAG = "RSE_POST_TO_DISCORD";
 
-	private static readonly ConcurrentDictionary<string, (Uri, CameraMediaMetadataBase)> _urlMappings = new();
+	private static readonly ConcurrentDictionary<string, DiscordPostContext> _urlMappings = new();
 	private static readonly ConcurrentDictionary<string, string> _misskeyFolderCache = new();
 
 	private static readonly BlueskySessionManager bskyManager = new();
 
 	enum ButtonState { Idle, Confirming, Uploading, Success, Warning, Error }
+	private sealed class SyncProgress<T>(Action<T> handler) : IProgress<T> {
+		public void Report(T value) => handler(value);
+	}
+	public sealed record DiscordPostContext(
+		Uri WebhookUri,
+		CameraMediaMetadataBase Metadata,
+		IProgress<CompressionProgress>? Progress,
+		TaskCompletionSource<Uri?> CompletionSource
+	);
+	public sealed class ProgressiveStreamContent(Stream stream, Action<long, long> onProgress, int bufferSize = 81920) : HttpContent {
+		private readonly Stream _stream = stream;
+		private readonly int _bufferSize = bufferSize;
+		private readonly long _totalBytes = stream.CanSeek ? stream.Length - stream.Position : -1;
+		private readonly Action<long, long> _onProgress = onProgress;
+
+		protected override Task SerializeToStreamAsync(Stream target, TransportContext? context) {
+			return SerializeToStreamAsync(target, context, CancellationToken.None);
+		}
+
+		protected override async Task SerializeToStreamAsync(Stream target, TransportContext? context, CancellationToken cancellationToken) {
+			byte[] buffer = new byte[_bufferSize];
+			long uploaded = 0;
+
+			int bytesRead;
+			while ((bytesRead = await _stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0) {
+				await target.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken).ConfigureAwait(false);
+				uploaded += bytesRead;
+				_onProgress(uploaded, _totalBytes);
+			}
+		}
+
+		protected override bool TryComputeLength(out long length) {
+			if (_totalBytes >= 0) {
+				length = _totalBytes;
+				return true;
+			}
+			length = 0;
+			return false;
+		}
+	}
 
 	public override void OnEngineInit() {
 #if DEBUG
@@ -169,6 +218,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 			ContextMenuItem menuItem = menu.AddItem(webhookName, RSE.PhotoMetadata_Patch.DISCORD_ICON_URI, null);
 
 			bool isConfirming = false;
+			bool isUploaded = false;
 
 			menuItem.Button.LocalPressed += async (button, eventData) => {
 				if (!menuItem.Button.Enabled) return;
@@ -188,12 +238,43 @@ public partial class RSEPostExtensions : ResoniteMod {
 					return;
 				}
 				menuItem.Button.Enabled = false;
-				menuItem.Label.Target.Value = $"<i>Compressing...";
-				bool posted = await PostToDiscord(metadata, new Uri(baseUrl));
-				if (menuItem != null && !menuItem.IsDisposed && !menuItem.IsDestroyed && !menuItem.IsRemoved && menuItem.IsValid) {
+				menuItem.Label.Target.Value = "<i>Preparing...";
+
+				int lastPercent = -1;
+				string? lastStage = null;
+
+				SyncProgress<CompressionProgress> progress = new(p => {
+					int percent = (int)Math.Round(p.Progress * 100);
+					if (percent == lastPercent && p.Stage == lastStage)
+						return;
+
+					lastPercent = percent;
+					lastStage = p.Stage;
+
+					if (menuItem == null || menuItem.IsDisposed || menuItem.IsDestroyed || menuItem.IsRemoved || !menuItem.IsValid)
+						return;
+
 					menuItem.RunSynchronously(() => {
-						if (posted) {
-							menuItem.Label.Target.Value = $"<i>Sent to {webhookName}";
+						if (menuItem == null || menuItem.IsDisposed || menuItem.IsDestroyed || menuItem.IsRemoved || !menuItem.IsValid)
+							return;
+
+						menuItem.Label.Target.Value = p.Progress >= 1.0
+							? $"<i>{p.Stage}"
+							: $"<i>{p.Stage} ({percent}%)";
+					});
+				});
+
+				Uri? postUrl = await PostToDiscord(metadata, new Uri(baseUrl), progress);
+				if (menuItem != null && !menuItem.IsDisposed && !menuItem.IsDestroyed && !menuItem.IsRemoved && menuItem.IsValid
+				&& menuItem.Slot != null && !menuItem.Slot.IsDisposed && !menuItem.Slot.IsDestroyed && !menuItem.Slot.IsRemoved && menuItem.Slot.IsActive) {
+					menuItem.RunSynchronously(() => {
+						if (postUrl != null) {
+							isUploaded = true;
+							menuItem.Label.Target.Value = $"Sent to {webhookName}\n<size=60%><color=#bcbcbc>Click to view message</color></size>";
+							Hyperlink linkComponent = menuItem.Slot.AttachComponent<Hyperlink>();
+							linkComponent.URL.Value = postUrl;
+							linkComponent.Reason.Value = $"View your Discord message";
+							menuItem.Button.Enabled = true;
 						} else {
 							menuItem.Label.Target.Value = $"<color=hero.red>Post Failed</color>\n<size=60%><color=#bcbcbc>Click to try again</color></size>";
 							menuItem.Color.Value = RadiantUI_Constants.Hero.RED;
@@ -475,6 +556,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 			}
 			string token = urlParts[1];
 
+			string uploadingStatus = "Posting...";
 			string currentInstanceName = baseUrl;
 			string currentDriveStats = "<alpha=#50>...</alpha>";
 
@@ -497,7 +579,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 						menuItem.Color.Value = currentColor;
 						break;
 					case ButtonState.Uploading:
-						menuItem.Label.Target.Value = "Uploading...";
+						menuItem.Label.Target.Value = uploadingStatus;
 						menuItem.Color.Value = currentColor;
 						break;
 					case ButtonState.Success:
@@ -531,26 +613,58 @@ public partial class RSEPostExtensions : ResoniteMod {
 					return;
 				}
 
+				uploadingStatus = "<i>Preparing...";
 				currentState = ButtonState.Uploading;
 				UpdateButtonVisuals();
 
-				(string? fileId, string? postBody) = await PostToMisskeyAsync(metadata, new Uri(baseUrl), token);
+				int lastPercent = -1;
+				string? lastStage = null;
 
-				if (menuItem == null || menuItem.IsRemoved) return;
+				SyncProgress<CompressionProgress> progress = new(p => {
+					int percent = (int)Math.Round(p.Progress * 100);
+					if (percent == lastPercent && p.Stage == lastStage)
+						return;
 
-				if (fileId != null) {
+					lastPercent = percent;
+					lastStage = p.Stage;
+
+					if (menuItem == null || menuItem.IsDisposed || menuItem.IsDestroyed || menuItem.IsRemoved || !menuItem.IsValid)
+						return;
+
 					menuItem.RunSynchronously(() => {
-						Hyperlink linkComponent = menuItem.Slot.AttachComponent<Hyperlink>();
-						linkComponent.URL.Value = BuildMkShareUri(baseUrl, "/share", postBody ?? "", fileId);
-						linkComponent.Reason.Value = $"Share this photo on {currentInstanceName}";
-						currentState = ButtonState.Success;
+						if (currentState != ButtonState.Uploading || menuItem == null || menuItem.IsDisposed || menuItem.IsDestroyed || menuItem.IsRemoved || !menuItem.IsValid)
+							return;
+
+						uploadingStatus = p.Progress >= 1.0
+							? $"<i>{p.Stage}"
+							: $"<i>{p.Stage} ({percent}%)";
+						UpdateButtonVisuals();
+					});
+				});
+
+				(string? fileId, string? postBody) = await PostToMisskeyAsync(metadata, new Uri(baseUrl), token, progress);
+
+				if (menuItem != null && !menuItem.IsDisposed && !menuItem.IsDestroyed && !menuItem.IsRemoved && menuItem.IsValid
+				&& menuItem.Slot != null && !menuItem.Slot.IsDisposed && !menuItem.Slot.IsDestroyed && !menuItem.Slot.IsRemoved && menuItem.Slot.IsActive) {
+					menuItem.RunSynchronously(() => {
+						if (fileId != null) {
+							Hyperlink linkComponent = menuItem.Slot.AttachComponent<Hyperlink>();
+							linkComponent.URL.Value = BuildMkShareUri(baseUrl, "/share", postBody ?? "", fileId);
+							linkComponent.Reason.Value = $"Share it on {currentInstanceName}";
+							currentState = ButtonState.Success;
+						} else {
+							currentState = ButtonState.Error;
+						}
+
+						UpdateButtonVisuals();
 					});
 				} else {
-					currentState = ButtonState.Error;
+					if (fileId != null) {
+						NotificationMessage.SpawnTextMessage($"Uploaded to {currentInstanceName} successfully!", RadiantUI_Constants.Hero.GREEN, 0.3f, 2.5f);
+					} else {
+						NotificationMessage.SpawnTextMessage($"Failed to upload to {currentInstanceName}!", RadiantUI_Constants.Hero.RED, 0.3f, 2.5f);
+					}
 				}
-				menuItem.RunSynchronously(() => {
-					UpdateButtonVisuals();
-				});
 			};
 
 			if (!Config!.GetValue(FetchMetadataFromWeb)) continue;
@@ -597,11 +711,12 @@ public partial class RSEPostExtensions : ResoniteMod {
 		}
 	}
 
-	static async Task<(string? fileId, string? postBody)> PostToMisskeyAsync(CameraMediaMetadataBase metadata, Uri instanceUrl, string accessToken) {
+	static async Task<(string? fileId, string? postBody)> PostToMisskeyAsync(CameraMediaMetadataBase metadata, Uri instanceUrl, string accessToken, IProgress<CompressionProgress>? progress = null, CancellationToken ct = default) {
 		if (!Config!.GetValue(Multiposting)) {
 			metadata.LocalUser.CloseContextMenu(null!);
 		}
 		Msg("Posting to Misskey...");
+		progress?.Report(new CompressionProgress(1.0, "Gathering metadata"));
 
 		Uri? url = null;
 		bool isVideo = false;
@@ -652,7 +767,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 			fileName = $"{fileName}{Path.GetExtension(tmpPath)}";
 
-			MisskeyDriveClient.DriveFile? file = await MisskeyDriveClient.UploadFileAsync(instanceUrl, accessToken, tmpPath, isVideo, folderId, fileName, altText);
+			MisskeyDriveClient.DriveFile? file = await MisskeyDriveClient.UploadFileAsync(instanceUrl, accessToken, tmpPath, isVideo, folderId, fileName, altText, progress: progress, ct: ct);
 
 			Msg($"Upload finished!");
 			return (file?.Id, postBodyText);
@@ -695,7 +810,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 		}
 
 		ButtonState currentState = ButtonState.Idle;
-		
+		string uploadingStatus = "Uploading...";
 
 		void UpdateButtonVisuals() {
 			if (menuItem == null || menuItem.IsRemoved) return;
@@ -711,7 +826,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 					menuItem.Color.Value = currentColor;
 					break;
 				case ButtonState.Uploading:
-					menuItem.Label.Target.Value = "Uploading...";
+					menuItem.Label.Target.Value = uploadingStatus;
 					menuItem.Color.Value = currentColor;
 					break;
 				case ButtonState.Success:
@@ -745,26 +860,58 @@ public partial class RSEPostExtensions : ResoniteMod {
 				return;
 			}
 
+			uploadingStatus = "<i>Preparing...";
 			currentState = ButtonState.Uploading;
 			UpdateButtonVisuals();
 
-			string? uploadResult = await PostToGalleVRAsync(metadata, gvrToken);
+			int lastPercent = -1;
+			string? lastStage = null;
 
-			if (menuItem == null || menuItem.IsRemoved) return;
+			SyncProgress<CompressionProgress> progress = new(p => {
+				int percent = (int)Math.Round(p.Progress * 100);
+				if (percent == lastPercent && p.Stage == lastStage)
+					return;
 
-			if (uploadResult != null) {
+				lastPercent = percent;
+				lastStage = p.Stage;
+
+				if (menuItem == null || menuItem.IsDisposed || menuItem.IsDestroyed || menuItem.IsRemoved || !menuItem.IsValid)
+					return;
+
 				menuItem.RunSynchronously(() => {
-					Hyperlink linkComponent = menuItem.Slot.AttachComponent<Hyperlink>();
-					linkComponent.URL.Value = new Uri("https://gallevr.app/gallery");
-					linkComponent.Reason.Value = "Manage your GalleVR photos";
-					currentState = ButtonState.Success;
+					if (currentState != ButtonState.Uploading || menuItem == null || menuItem.IsDisposed || menuItem.IsDestroyed || menuItem.IsRemoved || !menuItem.IsValid)
+						return;
+
+					uploadingStatus = p.Progress >= 1.0
+						? $"<i>{p.Stage}"
+						: $"<i>{p.Stage} ({percent}%)";
+					UpdateButtonVisuals();
+				});
+			});
+
+			string? uploadResult = await PostToGalleVRAsync(metadata, gvrToken, progress);
+
+			if (menuItem != null && !menuItem.IsDisposed && !menuItem.IsDestroyed && !menuItem.IsRemoved && menuItem.IsValid
+				&& menuItem.Slot != null && !menuItem.Slot.IsDisposed && !menuItem.Slot.IsDestroyed && !menuItem.Slot.IsRemoved && menuItem.Slot.IsActive) {
+				menuItem.RunSynchronously(() => {
+					if (uploadResult != null) {
+						Hyperlink linkComponent = menuItem.Slot.AttachComponent<Hyperlink>();
+						linkComponent.URL.Value = new Uri("https://gallevr.app/gallery");
+						linkComponent.Reason.Value = "Manage your GalleVR photos";
+						currentState = ButtonState.Success;
+					} else {
+						currentState = ButtonState.Error;
+					}
+
+					UpdateButtonVisuals();
 				});
 			} else {
-				currentState = ButtonState.Error;
+				if (uploadResult != null) {
+					NotificationMessage.SpawnTextMessage($"Uploaded to GalleVR successfully!", RadiantUI_Constants.Hero.GREEN, 0.3f, 2.5f);
+				} else {
+					NotificationMessage.SpawnTextMessage($"Failed to upload to GalleVR!", RadiantUI_Constants.Hero.RED, 0.3f, 2.5f);
+				}
 			}
-			menuItem.RunSynchronously(() => {
-				UpdateButtonVisuals();
-			});
 		};
 	}
 	static bool CheckGalleValidity(CameraMediaMetadataBase metadata) {
@@ -776,12 +923,13 @@ public partial class RSEPostExtensions : ResoniteMod {
 		return true;
 	}
 
-	static async Task<string?> PostToGalleVRAsync(CameraMediaMetadataBase potentialMetadata, string token) {
+	static async Task<string?> PostToGalleVRAsync(CameraMediaMetadataBase potentialMetadata, string token, IProgress<CompressionProgress>? progress = null, CancellationToken ct = default) {
 		if (potentialMetadata is not PhotoMetadata metadata) return null;
 		if (!Config!.GetValue(Multiposting)) {
 			metadata.LocalUser.CloseContextMenu(null!);
 		}
 		Msg("Posting to GalleVR...");
+		progress?.Report(new CompressionProgress(1.0, "Gathering metadata"));
 
 		var tex = metadata.Slot.GetComponent<StaticTexture2D>();
 		var url = tex?.URL.Value;
@@ -868,7 +1016,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 				Players = galleVRPlayers
 			};
 
-			string? photoUrl = await GalleVRClient.UploadFileAsync(metadata.TakenBy._userId.Value, token, tmpPath, formattedMetadata, metadata);
+			string? photoUrl = await GalleVRClient.UploadFileAsync(metadata.TakenBy._userId.Value, token, tmpPath, formattedMetadata, metadata, progress, ct);
 			// GalleVR returns the photo link (yay!) but going to it just redirects to an empty profile (bruh)
 			Msg($"Upload finished!");
 			return photoUrl;
@@ -898,7 +1046,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 			}
 			string password = identityParts[1];
 			string? currentWarning = null;
-
+			string uploadingStatus = "Posting...";
 
 			colorX currentColor = colorX.FromHexCode("1185fe");
 			ContextMenuItem menuItem = menu.AddItem($"@{handle}", BLUESKY_URI, currentColor);
@@ -922,7 +1070,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 						menuItem.Color.Value = RadiantUI_Constants.Hero.ORANGE;
 						break;
 					case ButtonState.Uploading:
-						menuItem.Label.Target.Value = "Posting...";
+						menuItem.Label.Target.Value = uploadingStatus;
 						menuItem.Color.Value = currentColor;
 						break;
 					case ButtonState.Success:
@@ -957,35 +1105,71 @@ public partial class RSEPostExtensions : ResoniteMod {
 				}
 
 				bool postAnyway = currentState == ButtonState.Warning;
+				uploadingStatus = "<i>Preparing...";
 				currentState = ButtonState.Uploading;
 				UpdateButtonVisuals();
 
-				(Uri? postUrl, currentWarning) = await PostToBlueskyAsync(metadata, handle, password, postAnyway);
+				int lastPercent = -1;
+				string? lastStage = null;
 
-				if (menuItem == null || menuItem.IsRemoved) return;
+				SyncProgress<CompressionProgress> progress = new(p => {
+					int percent = (int)Math.Round(p.Progress * 100);
+					if (percent == lastPercent && p.Stage == lastStage)
+						return;
 
-				if (postUrl != null) {
+					lastPercent = percent;
+					lastStage = p.Stage;
+
+					if (menuItem == null || menuItem.IsDisposed || menuItem.IsDestroyed || menuItem.IsRemoved || !menuItem.IsValid)
+						return;
+
 					menuItem.RunSynchronously(() => {
-						Hyperlink linkComponent = menuItem.Slot.AttachComponent<Hyperlink>();
-						linkComponent.URL.Value = postUrl;
-						linkComponent.Reason.Value = $"View your Bluesky post";
-						currentState = ButtonState.Success;
+						if (currentState != ButtonState.Uploading || menuItem == null || menuItem.IsDisposed || menuItem.IsDestroyed || menuItem.IsRemoved || !menuItem.IsValid)
+							return;
+
+						uploadingStatus = p.Progress >= 1.0
+							? $"<i>{p.Stage}"
+							: $"<i>{p.Stage} ({percent}%)";
+						UpdateButtonVisuals();
+					});
+				});
+
+				(Uri? postUrl, currentWarning) = await PostToBlueskyAsync(metadata, handle, password, postAnyway, progress);
+
+				if (menuItem != null && !menuItem.IsDisposed && !menuItem.IsDestroyed && !menuItem.IsRemoved && menuItem.IsValid
+				&& menuItem.Slot != null && !menuItem.Slot.IsDisposed && !menuItem.Slot.IsDestroyed && !menuItem.Slot.IsRemoved && menuItem.Slot.IsActive) {
+					menuItem.RunSynchronously(() => {
+						if (postUrl != null) {
+							Hyperlink linkComponent = menuItem.Slot.AttachComponent<Hyperlink>();
+							linkComponent.URL.Value = postUrl;
+							linkComponent.Reason.Value = $"View your Bluesky post";
+							currentState = ButtonState.Success;
+						} else {
+							if (currentWarning != null) {
+								currentState = ButtonState.Warning;
+							} else {
+								currentState = ButtonState.Error;
+							}
+						}
+
+						UpdateButtonVisuals();
 					});
 				} else {
-					if (currentWarning != null) {
-						currentState = ButtonState.Warning;
+					if (postUrl != null) {
+						NotificationMessage.SpawnTextMessage($"Posted to Bluesky successfully!", RadiantUI_Constants.Hero.GREEN, 0.3f, 2.5f);
 					} else {
-						currentState = ButtonState.Error;
+						if (currentWarning != null) {
+							NotificationMessage.SpawnTextMessage($"Couldn't post due to warning: {currentWarning}\nRetry the post to continue", RadiantUI_Constants.Hero.ORANGE, 0.3f, 8f);
+						} else {
+							NotificationMessage.SpawnTextMessage($"Failed to post to Bluesky!", RadiantUI_Constants.Hero.RED, 0.3f, 2.5f);
+						}
 					}
 				}
-				menuItem.RunSynchronously(() => {
-					UpdateButtonVisuals();
-				});
 			};
 		}
 	}
 
-	static async Task<(Uri? uri, string? warning)> PostToBlueskyAsync(CameraMediaMetadataBase metadata, string handle, string password, bool forceTruncate = false) {
+	static async Task<(Uri? uri, string? warning)> PostToBlueskyAsync(CameraMediaMetadataBase metadata, string handle, string password, bool forceTruncate = false, IProgress<CompressionProgress>? progress = null, CancellationToken ct = default) {
 		if (!Config!.GetValue(Multiposting)) {
 			metadata.LocalUser.CloseContextMenu(null!);
 		}
@@ -996,14 +1180,14 @@ public partial class RSEPostExtensions : ResoniteMod {
 				NotificationMessage.SpawnTextMessage("[RSEPostExtensions] No app password specified!", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
 				return (null, null);
 			}
-
+			progress?.Report(new CompressionProgress(1.0, "Authenticating"));
 			await bskyManager.LoginAsync(handle, password);
 		} catch (Exception ex) {
 			Warn($"Failed to login to Bluesky: {ex.Message}");
 			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Bluesky Login Failed!", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
 			return (null, null);
 		}
-
+		progress?.Report(new CompressionProgress(1.0, "Gathering metadata"));
 
 		Uri? url = null;
 		bool isVideo = false;
@@ -1060,7 +1244,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 			bool useLinkCard = Config!.GetValue(BlueskyLinkCard);
 
-			Uri postUri = await bskyManager.UploadAndPostMediaAsync(handle, tmpPath, isVideo, postBodyText, altText, worldUrl, cardTitle, cardDesc, useLinkCard);
+			Uri? postUri = await bskyManager.UploadAndPostMediaAsync(handle, tmpPath, isVideo, postBodyText, altText, worldUrl, cardTitle, cardDesc, useLinkCard, progress, ct);
 
 			Msg($"Bluesky upload finished!");
 			return (postUri, null);
@@ -1105,117 +1289,121 @@ public partial class RSEPostExtensions : ResoniteMod {
 		string webhookUrl = Traverse.Create(__instance).Field("_webhookUrl").GetValue<string>();
 		HttpClient client = Traverse.Create(__instance).Field("_client").GetValue<HttpClient>();
 
-		if (_urlMappings.TryGetValue(srcPath, out (Uri webhookUri, CameraMediaMetadataBase metadata) mapping)) {
-			__result = InjectAltText(mapping.metadata, srcPath, fields, webhookUrl, client);
+		if (_urlMappings.TryGetValue(srcPath, out DiscordPostContext? context)) {
+			__result = InjectAltText(context, srcPath, fields, webhookUrl, client);
 			return false;
 		}
 		return true;
 	}
 
-	private static async Task<bool> InjectAltText(CameraMediaMetadataBase metadata, string srcPath, IEnumerable<ResoniteScreenshotExtensions.DiscordWebhookClient.EmbedField> fields, string webhookUrl, HttpClient client) {
-		string altText = await AltTextFromMetadata(metadata);
-		if (altText.Length > 1024) altText = string.Concat(altText.AsSpan(0, 1021), "...");
+	private static async Task<bool> InjectAltText(
+		DiscordPostContext context,
+		string srcPath,
+		IEnumerable<ResoniteScreenshotExtensions.DiscordWebhookClient.EmbedField> fields,
+		string webhookUrl,
+		HttpClient client) {
+		try {
+			context.Progress?.Report(new CompressionProgress(1.0, "Preparing image..."));
+			string altText = await AltTextFromMetadata(context.Metadata);
+			if (altText.Length > 1024) altText = string.Concat(altText.AsSpan(0, 1021), "...");
 
-		string escapedAltText = Newtonsoft.Json.JsonConvert.ToString(altText);
+			string escapedAltText = Newtonsoft.Json.JsonConvert.ToString(altText);
 
-		using (var fileStream = File.OpenRead(srcPath)) {
-			(string mimeType, string extension) = Util.GuessImageMimeType(fileStream);
-			string fileName = $"image{extension}";
+			using (var fileStream = File.OpenRead(srcPath)) {
+				(string mimeType, string extension) = Util.GuessImageMimeType(fileStream);
+				string fileName = $"image{extension}";
 
-			string fieldsJson = string.Join(", ", fields.Select(f => f.ToJson()));
-			string json = $"{{\"embeds\": [{{\"fields\": [{fieldsJson}]}}], \"attachments\": [{{\"id\": 0, \"filename\": \"{fileName}\", \"description\": {escapedAltText}}}]}}";
+				string fieldsJson = string.Join(", ", fields.Select(f => f.ToJson()));
+				string json = $"{{\"embeds\": [{{\"fields\": [{fieldsJson}]}}], \"attachments\": [{{\"id\": 0, \"filename\": \"{fileName}\", \"description\": {escapedAltText}}}]}}";
 
-			return await PostToDiscordWithAltText(json, fileStream, mimeType, extension, webhookUrl, client);
+				Uri? messageUrl = await DiscordClient.PostToDiscordWithAltText(json, fileStream, mimeType, extension, webhookUrl, client, context.Progress);
+				context.CompletionSource.TrySetResult(messageUrl);
+				return messageUrl != null;
+			}
+		} catch (Exception ex) {
+			RSEPostExtensions.Warn($"Error occurred whilst posting image to Discord!! {ex}");
+			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Error posting image to Discord, check log!!", colorX.Red, 0.7f, 5f);
+			context.CompletionSource.TrySetResult(null);
+			return false;
+		} finally {
+			_urlMappings.TryRemove(srcPath, out _);
 		}
 	}
 
-	private static async Task<bool> PostToDiscordWithAltText(string payloadJson, FileStream fileStream, string mimeType, string extension, string webhookUrl, HttpClient client) {
-		fileStream.Seek(0, SeekOrigin.Begin);
-
-		var fileContent = new StreamContent(fileStream);
-		fileContent.Headers.ContentType = new MediaTypeHeaderValue(mimeType);
-		fileContent.Headers.ContentDisposition = new ContentDispositionHeaderValue("form-data") {
-			Name = "files[0]",
-			FileName = $"image{extension}",
-		};
-
-		var request = new HttpRequestMessage(HttpMethod.Post, webhookUrl);
-		var form = new MultipartFormDataContent
-		{
-			{ fileContent, "files[0]" },
-			{ new System.Net.Http.StringContent(payloadJson), "payload_json" }
-		};
-		request.Content = form;
-
-		var response = await client.SendAsync(request);
-		if (!response.IsSuccessStatusCode) {
-			Warn($"Failed to post image to Discord: {response.StatusCode} {await response.Content.ReadAsStringAsync()}");
-			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post video to Discord, check log", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
-		}
-		return response.IsSuccessStatusCode;
-	}
-
-	static async Task<bool> PostToDiscord(CameraMediaMetadataBase metadata, Uri webhookUri) {
+	static async Task<Uri?> PostToDiscord(CameraMediaMetadataBase metadata, Uri webhookUri, IProgress<CompressionProgress>? progress = null) {
 		if (!Config!.GetValue(Multiposting)) {
 			metadata.LocalUser.CloseContextMenu(null!);
 		}
 		Msg("Posting to Discord...");
 
-		bool posted = await metadata.StartGlobalTask(async Task<bool> () => {
+		Uri? postUrl = await metadata.StartGlobalTask(async Task<Uri?> () => {
 			switch (metadata) {
-				case PhotoMetadata metadata: {
-						StaticTexture2D? tex = metadata.Slot.GetComponent<StaticTexture2D>();
+				case PhotoMetadata photoMetadata: {
+						StaticTexture2D? tex = photoMetadata.Slot.GetComponent<StaticTexture2D>();
 						Uri? url = tex?.URL.Value;
 
 						if (url is null) break;
 
 						await new ToBackground();
-						string? tmpPath = await metadata.Engine.AssetManager.GatherAssetFile(url, 100f);
+						progress?.Report(new CompressionProgress(1.0, "Gathering asset..."));
+						string? tmpPath = await photoMetadata.Engine.AssetManager.GatherAssetFile(url, 100f);
 						if (tmpPath is null) break;
 
 						Msg("Posting to Discord as photo");
-						_urlMappings[tmpPath] = (webhookUri, metadata);
-						RSE.PhotoMetadata_Patch.PostToDiscord(new Metadata(metadata), tmpPath);
-						return true;
+						var tcs = new TaskCompletionSource<Uri?>(TaskCreationOptions.RunContinuationsAsynchronously);
+						_urlMappings[tmpPath] = new DiscordPostContext(webhookUri, photoMetadata, progress, tcs);
+
+						try {
+							RSE.PhotoMetadata_Patch.PostToDiscord(new Metadata(photoMetadata), tmpPath);
+
+							Task completed = await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromMinutes(2)));
+							if (completed != tcs.Task) {
+								Warn("Timed out waiting for RSE photo upload to complete.");
+								return null;
+							}
+
+							return await tcs.Task;
+						} finally {
+							_urlMappings.TryRemove(tmpPath, out _);
+						}
 					}
-				case VideoMetadata metadata: //RSE doesn't support videos, we'll have to handle it ourselves
-					{
-						VideoPlayerInterface? playerInterface = metadata.Slot.GetComponent<VideoPlayerInterface>();
+				case VideoMetadata videoMetadata: {
+						VideoPlayerInterface? playerInterface = videoMetadata.Slot.GetComponent<VideoPlayerInterface>();
 						if (playerInterface is null || playerInterface.URL.Target is null) break;
 						Uri? url = playerInterface.URL.Target.Value;
 						if (url is null) break;
 
 						await new ToBackground();
-						string? tmpPath = await metadata.Engine.AssetManager.GatherAssetFile(url, 100f);
+						progress?.Report(new CompressionProgress(1.0, "Gathering asset..."));
+						string? tmpPath = await videoMetadata.Engine.AssetManager.GatherAssetFile(url, 100f);
 						if (tmpPath is null) break;
 
-						string altText = await AltTextFromMetadata(metadata);
+						string altText = await AltTextFromMetadata(videoMetadata);
 
 						Msg("Posting to Discord as video");
-						bool posted = await DiscordClient.PostVideoToDiscord(metadata, tmpPath, altText, webhookUri).ContinueWith(bool (t) =>  {
+						return await DiscordClient.PostVideoToDiscord(videoMetadata, tmpPath, altText, webhookUri, progress).ContinueWith(Uri? (t) => {
 							if (t.IsFaulted) {
 								Warn($"Error occurred whilst posting video to Discord!! {t.Exception}");
-								NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Error posting video to Discord, check log!!", colorX.Red, 0.7f, 5f); // making it redder because it means something blew up extra bad
-								return false;
-							} else {
-								if (!t.Result) {
-									Warn($"Failed to post video to Discord");
-									NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post video to Discord, check log", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
-									return false;
-								}
+								NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Error posting video to Discord, check log!!", colorX.Red, 0.7f, 5f);
+								return null;
 							}
-							return true;
+							if (t.Result == null) {
+								Warn("Failed to post video to Discord");
+								NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post video to Discord, check log", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
+								return null;
+							}
+							return t.Result;
 						});
-						return posted;
 					}
 				default:
 					Msg("Posting to Discord as.. um.. what kind of file is this");
 					NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Media type currently unsupported :(", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
-					return false;
+					return null;
 			}
-			return false;
+			return null;
 		});
-		return posted;
+
+		return postUrl;
 	}
 
 	[HarmonyPatch(typeof(RSE.PhotoMetadata_Patch), "PostToDiscord")]
@@ -1228,7 +1416,6 @@ public partial class RSEPostExtensions : ResoniteMod {
 					instruction.operand is MethodInfo mi &&
 					mi.Name == nameof(ModConfiguration.GetValue) &&
 					mi.ReturnType == typeof(string)) {
-					// Inject file path and hijack the call
 					yield return new CodeInstruction(OpCodes.Ldarg_1);
 					yield return new CodeInstruction(OpCodes.Call, myMiddleman);
 				} else {
@@ -1239,20 +1426,14 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 		public static string? CustomConfigInterceptor(ModConfiguration configInstance, ModConfigurationKey<string> key, string filePath) {
 			if (Config!.GetValue(Enabled) && key == RSE.DiscordWebhookUrlKey) {
-				if (_urlMappings.TryGetValue(filePath, out (Uri webhookUri, CameraMediaMetadataBase metadata) mapping)) {
-					return mapping.webhookUri.ToString();
+				if (_urlMappings.TryGetValue(filePath, out DiscordPostContext? context)) {
+					return context.WebhookUri.ToString();
 				}
 				Warn("Couldn't find webhook URI mapping!! ABORT!!!");
 				NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to Discord, please try again!", RadiantUI_Constants.Hero.RED, 0.7f, 5f);
 				return "";
 			}
 			return configInstance.GetValue(key);
-		}
-
-		[HarmonyFinalizer]
-		public static void Postfix(string filePath) {
-			_urlMappings.TryRemove(filePath, out _);
-			Msg("Completed!");
 		}
 	}
 

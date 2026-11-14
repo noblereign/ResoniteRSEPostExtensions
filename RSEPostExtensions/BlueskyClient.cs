@@ -9,6 +9,8 @@ using SixLabors.ImageSharp.Processing;
 
 using static Elements.Core.FileUtil;
 using static RSEPostExtensions.BlueskyClient;
+using static RSEPostExtensions.RSEPostExtensions;
+using static RSEPostExtensions.Util;
 
 namespace RSEPostExtensions;
 public partial class BlueskyClient {
@@ -114,18 +116,19 @@ public partial class BlueskyClient {
 		return (await response.Content.ReadFromJsonAsync<SessionResponse>())!;
 	}
 
-	public static async Task<SessionResponse> RefreshSessionAsync(Uri pdsUrl, string refreshJwt) {
+	public static async Task<SessionResponse> RefreshSessionAsync(Uri pdsUrl, string refreshJwt, IProgress<CompressionProgress>? progress = null, CancellationToken ct = default) {
 		Uri refreshEndpoint = new(pdsUrl, "xrpc/com.atproto.server.refreshSession");
+		progress?.Report(new CompressionProgress(1.0, "Refreshing session..."));
 
 		using var request = new HttpRequestMessage(HttpMethod.Post, refreshEndpoint);
 		request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshJwt);
 
-		using var response = await _http.SendAsync(request);
+		using var response = await _http.SendAsync(request, ct);
 		await EnsureSuccessWithBodyAsync(response);
 
-		return (await response.Content.ReadFromJsonAsync<SessionResponse>())!;
+		return (await response.Content.ReadFromJsonAsync<SessionResponse>(cancellationToken: ct))!;
 	}
-	private static async Task<(Stream stream, string mimeType)> EnsureImageSizeLimitAsync(string localFilePath, int maxBytes) {
+	private static async Task<(Stream stream, string mimeType)> EnsureImageSizeLimitAsync(string localFilePath, int maxBytes, IProgress<CompressionProgress>? progress = null, CancellationToken ct = default) {
 		var fileInfo = new FileInfo(localFilePath);
 
 		if (fileInfo.Length <= maxBytes) {
@@ -145,7 +148,9 @@ public partial class BlueskyClient {
 		MemoryStream compressedStream = await Util.CompressImageAsync(
 			localFilePath,
 			targetMiB: targetMiB,
-			maxDimension: 2000
+			maxDimension: 2000,
+			progress: progress,
+			ct: ct
 		);
 
 		if (compressedStream.Length > maxBytes) {
@@ -157,36 +162,60 @@ public partial class BlueskyClient {
 		return (compressedStream, "image/webp");
 	}
 
-	public static async Task<BlobData> UploadBlobAsync(Uri pdsUrl, string token, string localFilePath, int maxBytes) {
-		Uri uploadEndpoint = new(pdsUrl, "xrpc/com.atproto.repo.uploadBlob");
-		using var request = new HttpRequestMessage(HttpMethod.Post, uploadEndpoint);
-		request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+	public static async Task<BlobData?> UploadBlobAsync(
+	Uri pdsUrl,
+	string token,
+	string localFilePath,
+	int maxBytes,
+	IProgress<CompressionProgress>? progress = null,
+	CancellationToken ct = default) {
+		progress?.Report(new CompressionProgress(1.0, "Preparing image"));
+		(Stream stream, string mimeType) = await EnsureImageSizeLimitAsync(localFilePath, maxBytes, progress, ct);
 
-		(Stream stream, string mimeType) = await EnsureImageSizeLimitAsync(localFilePath, maxBytes);
-		StreamContent content = new(stream);
-		content.Headers.ContentType = new MediaTypeHeaderValue(mimeType);
-		request.Content = content;
+		await using (stream) {
+			Uri uploadEndpoint = new(pdsUrl, "xrpc/com.atproto.repo.uploadBlob");
+			using HttpRequestMessage request = new(HttpMethod.Post, uploadEndpoint);
+			request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-		using var response = await _http.SendAsync(request);
-		await EnsureSuccessWithBodyAsync(response);
+			ProgressiveStreamContent content = new(stream, (sent, total) => {
+				if (progress == null || total <= 0)
+					return;
 
-		var result = await response.Content.ReadFromJsonAsync<BlobResponse>();
-		return result!.Blob;
+				if (sent >= total) {
+					progress.Report(new CompressionProgress(1.0, "Validating..."));
+					return;
+				}
+
+				double ratio = Math.Clamp((double)sent / total, 0.0, 0.99);
+				progress.Report(new CompressionProgress(ratio, "Uploading..."));
+			});
+			content.Headers.ContentType = new MediaTypeHeaderValue(mimeType);
+			request.Content = content;
+
+			using HttpResponseMessage response = await _http.SendAsync(request, ct);
+			await EnsureSuccessWithBodyAsync(response);
+
+			BlobResponse? result = await response.Content.ReadFromJsonAsync<BlobResponse>(cancellationToken: ct);
+			return result?.Blob;
+		}
 	}
 
 	private static readonly Uri VideoServiceBaseUri = new("https://video.bsky.app/");
 
 	public static async Task<(BlobData, (int, int) resolution)> UploadVideoAsync(
-		Uri pdsUrl,
-		string token,
-		string did,
-		string filePath,
-		CancellationToken cancellationToken = default) {
+	Uri pdsUrl,
+	string token,
+	string did,
+	string filePath,
+	IProgress<CompressionProgress>? progress = null,
+	CancellationToken cancellationToken = default) {
 
-		(string compressedVideoPath, bool autoDelete, (int, int) resolution) = await Util.CompressVideoAsync(filePath, 299, 96, true, cancellationToken);
+		(string compressedVideoPath, bool autoDelete, (int, int) resolution) = await Util.CompressVideoAsync(filePath, 299, 96, true, progress, cancellationToken);
 		try {
 			using (FileStream fileStream = File.OpenRead(compressedVideoPath)) {
 				(string mimeType, string extension) = Util.GuessVideoMimeType(fileStream);
+
+				progress?.Report(new CompressionProgress(1.0, "Authenticating"));
 
 				long exp = DateTimeOffset.UtcNow.AddMinutes(30).ToUnixTimeSeconds();
 				string audience = Uri.EscapeDataString($"did:web:{pdsUrl.Host}");
@@ -207,11 +236,19 @@ public partial class BlueskyClient {
 				using var uploadRequest = new HttpRequestMessage(HttpMethod.Post, uploadEndpoint);
 				uploadRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", authResult.Token);
 
-				var streamContent = new StreamContent(fileStream);
+				var streamContent = new ProgressiveStreamContent(fileStream, (sent, total) => {
+					if (progress == null || total <= 0)
+						return;
+
+					if (sent >= total) {
+						progress.Report(new CompressionProgress(1.0, "Processing..."));
+						return;
+					}
+
+					double ratio = Math.Clamp((double)sent / total, 0.0, 0.99);
+					progress.Report(new CompressionProgress(ratio, "Uploading..."));
+				});
 				streamContent.Headers.ContentType = new MediaTypeHeaderValue(mimeType);
-				if (fileStream.CanSeek) {
-					streamContent.Headers.ContentLength = fileStream.Length - fileStream.Position;
-				}
 				uploadRequest.Content = streamContent;
 
 				using var uploadResponse = await _http.SendAsync(uploadRequest, cancellationToken);
@@ -226,6 +263,7 @@ public partial class BlueskyClient {
 					throw new InvalidOperationException("Video upload returned an empty job status.");
 				}
 
+				progress?.Report(new CompressionProgress(1.0, "Processing..."));
 				Uri statusEndpoint = new(VideoServiceBaseUri, $"xrpc/app.bsky.video.getJobStatus?jobId={Uri.EscapeDataString(status.JobId)}");
 
 				while (status.Blob is null) {
@@ -233,12 +271,15 @@ public partial class BlueskyClient {
 						throw new InvalidOperationException($"Bluesky video processing failed ({status.Error}): {status.Message}");
 					}
 
+					double serverProgress = status.Progress is int p ? Math.Clamp(p / 100.0, 0.0, 0.99) : 1.0;
+					progress?.Report(new CompressionProgress(serverProgress, "Processing..."));
+
 					await Task.Delay(1000, cancellationToken);
 
 					using var statusResponse = await _http.GetAsync(statusEndpoint, cancellationToken);
 					await EnsureSuccessWithBodyAsync(statusResponse);
 
-					var wrapper = (await statusResponse.Content.ReadFromJsonAsync<VideoJobStatusResponse>(cancellationToken))!;
+					VideoJobStatusResponse wrapper = (await statusResponse.Content.ReadFromJsonAsync<VideoJobStatusResponse>(cancellationToken))!;
 					status = wrapper.JobStatus;
 				}
 
@@ -355,7 +396,16 @@ public partial class BlueskyClient {
 		return (cleanText, facets);
 	}
 
-	public static async Task<CreateRecordResponse> CreatePostWithImageAsync(Uri pdsUrl, string token, string did, string text, string altText, BlobData uploadedBlob) {
+	public static async Task<CreateRecordResponse> CreatePostWithImageAsync(
+		Uri pdsUrl, 
+		string token, 
+		string did, 
+		string text, 
+		string altText, 
+		BlobData uploadedBlob, 
+		IProgress<CompressionProgress>? progress = null, 
+		CancellationToken ct = default) {
+
 		Uri recordEndpoint = new(pdsUrl, "xrpc/com.atproto.repo.createRecord");
 
 		var record = new Dictionary<string, object> {
@@ -373,6 +423,7 @@ public partial class BlueskyClient {
 			}}
 		};
 
+		progress?.Report(new CompressionProgress(1.0, "Parsing facets"));
 		var (cleanText, facets) = await ParseFacetsAsync(text);
 
 		record["text"] = cleanText;
@@ -393,13 +444,24 @@ public partial class BlueskyClient {
 		string jsonPayload = JsonSerializer.Serialize(payload);
 		request.Content = new StringContent(jsonPayload, System.Text.Encoding.UTF8, "application/json");
 
-		using var response = await _http.SendAsync(request);
+		progress?.Report(new CompressionProgress(1.0, "Posting..."));
+		using var response = await _http.SendAsync(request, ct);
 		await EnsureSuccessWithBodyAsync(response);
 
-		return (await response.Content.ReadFromJsonAsync<CreateRecordResponse>())!;
+		return (await response.Content.ReadFromJsonAsync<CreateRecordResponse>(cancellationToken: ct))!;
 	}
 
-	public static async Task<CreateRecordResponse> CreatePostWithVideoAsync(Uri pdsUrl, string token, string did, string text, string altText, BlobData uploadedBlob, (int width, int height) resolution) {
+	public static async Task<CreateRecordResponse> CreatePostWithVideoAsync(
+		Uri pdsUrl, 
+		string token, 
+		string did, 
+		string text, 
+		string altText, 
+		BlobData uploadedBlob, 
+		(int width, int height) resolution, 
+		IProgress<CompressionProgress>? progress = null, 
+		CancellationToken ct = default) {
+
 		Uri recordEndpoint = new(pdsUrl, "xrpc/com.atproto.repo.createRecord");
 
 		var record = new Dictionary<string, object> {
@@ -418,6 +480,7 @@ public partial class BlueskyClient {
 			}}
 		};
 
+		progress?.Report(new CompressionProgress(1.0, "Parsing facets"));
 		var (cleanText, facets) = await ParseFacetsAsync(text);
 
 		record["text"] = cleanText;
@@ -438,10 +501,11 @@ public partial class BlueskyClient {
 		string jsonPayload = JsonSerializer.Serialize(payload);
 		request.Content = new StringContent(jsonPayload, System.Text.Encoding.UTF8, "application/json");
 
-		using var response = await _http.SendAsync(request);
+		progress?.Report(new CompressionProgress(1.0, "Posting..."));
+		using var response = await _http.SendAsync(request, ct);
 		await EnsureSuccessWithBodyAsync(response);
 
-		return (await response.Content.ReadFromJsonAsync<CreateRecordResponse>())!;
+		return (await response.Content.ReadFromJsonAsync<CreateRecordResponse>(cancellationToken: ct))!;
 	}
 
 	public static async Task<CreateRecordResponse> CreatePostWithExternalCardAsync(
@@ -452,7 +516,9 @@ public partial class BlueskyClient {
 		string linkUrl,
 		string cardTitle,
 		string cardDescription,
-		BlobData thumbBlob) {
+		BlobData thumbBlob,
+		IProgress<CompressionProgress>? progress = null,
+		CancellationToken ct = default) {
 		Uri recordEndpoint = new(pdsUrl, "xrpc/com.atproto.repo.createRecord");
 
 		var record = new Dictionary<string, object> {
@@ -470,6 +536,7 @@ public partial class BlueskyClient {
 			}}
 		};
 
+		progress?.Report(new CompressionProgress(1.0, "Parsing facets"));
 		var (cleanText, facets) = await ParseFacetsAsync(text);
 
 		record["text"] = cleanText;
@@ -484,10 +551,11 @@ public partial class BlueskyClient {
 		request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 		request.Content = new StringContent(JsonSerializer.Serialize(payload), System.Text.Encoding.UTF8, "application/json");
 
-		using var response = await _http.SendAsync(request);
+		progress?.Report(new CompressionProgress(1.0, "Posting..."));
+		using var response = await _http.SendAsync(request, ct);
 		await EnsureSuccessWithBodyAsync(response);
 
-		return (await response.Content.ReadFromJsonAsync<CreateRecordResponse>())!;
+		return (await response.Content.ReadFromJsonAsync<CreateRecordResponse>(cancellationToken: ct))!;
 	}
 
 	private static async Task EnsureSuccessWithBodyAsync(HttpResponseMessage response) {
@@ -538,7 +606,7 @@ public class BlueskySessionManager {
 		}
 	}
 
-	public async Task<Uri> UploadAndPostMediaAsync(string identifier, string localPath, bool isVideo, string text, string altText, string? worldUrl, string cardTitle, string cardDescription, bool useLinkCard) {
+	public async Task<Uri?> UploadAndPostMediaAsync(string identifier, string localPath, bool isVideo, string text, string altText, string? worldUrl, string cardTitle, string cardDescription, bool useLinkCard, IProgress<CompressionProgress>? progress = null, CancellationToken ct = default) {
 		string normalizedId = identifier.TrimStart('@');
 
 		if (!_sessions.TryGetValue(normalizedId, out var session) || string.IsNullOrEmpty(session.AccessJwt)) {
@@ -546,41 +614,48 @@ public class BlueskySessionManager {
 		}
 
 		try {
-			return await ExecutePostLogicAsync(session, localPath, isVideo, text, altText, worldUrl, cardTitle, cardDescription, useLinkCard);
+			return await ExecutePostLogicAsync(session, localPath, isVideo, text, altText, worldUrl, cardTitle, cardDescription, useLinkCard, progress, ct);
 		} catch (HttpRequestException ex) when (ex.Message.Contains("401") || ex.Message.Contains("ExpiredToken")) {
-			var newTokens = await RefreshSessionAsync(session.PdsUrl, session.RefreshJwt);
+			var newTokens = await RefreshSessionAsync(session.PdsUrl, session.RefreshJwt, progress, ct);
 
 			session.Did = newTokens.Did;
 			session.AccessJwt = newTokens.AccessJwt;
 			session.RefreshJwt = newTokens.RefreshJwt;
 
-			return await ExecutePostLogicAsync(session, localPath, isVideo, text, altText, worldUrl, cardTitle, cardDescription, useLinkCard);
+			return await ExecutePostLogicAsync(session, localPath, isVideo, text, altText, worldUrl, cardTitle, cardDescription, useLinkCard, progress, ct);
 		}
 	}
 
-	private static async Task<Uri> ExecutePostLogicAsync(BlueskySessionState session, string localPath, bool isVideo, string text, string altText, string? worldUrl, string cardTitle, string cardDescription, bool useLinkCard) {
-		int targetBytes = useLinkCard ? 950000 : 1900000;
-		
+	private static async Task<Uri?> ExecutePostLogicAsync(BlueskySessionState session, string localPath, bool isVideo, string text, string altText, string? worldUrl, string cardTitle, string cardDescription, bool useLinkCard, IProgress<CompressionProgress>? progress = null, CancellationToken ct = default) {
 		BlobData? blob;
 		(int, int)? resolution = null;
 		if (isVideo) {
-			(blob, resolution) = await UploadVideoAsync(session.PdsUrl, session.AccessJwt, session.Did, localPath);
+			(blob, resolution) = await UploadVideoAsync(session.PdsUrl, session.AccessJwt, session.Did, localPath, progress, ct);
 		} else {
-			blob = await UploadBlobAsync(session.PdsUrl, session.AccessJwt, localPath, targetBytes);
+			int targetBytes = useLinkCard ? 950000 : 1900000;
+			blob = await UploadBlobAsync(session.PdsUrl, session.AccessJwt, localPath, targetBytes, progress, ct);
+		}
+
+		if (blob == null) {
+			return null;
 		}
 
 		CreateRecordResponse record;
 
 		if (useLinkCard && !isVideo && !string.IsNullOrEmpty(worldUrl)) {
-			record = await CreatePostWithExternalCardAsync(session.PdsUrl, session.AccessJwt, session.Did, text, worldUrl, cardTitle, cardDescription, blob);
+			record = await CreatePostWithExternalCardAsync(session.PdsUrl, session.AccessJwt, session.Did, text, worldUrl, cardTitle, cardDescription, blob, progress, ct);
 		}
 		else if (isVideo) {
-			record = await CreatePostWithVideoAsync(session.PdsUrl, session.AccessJwt, session.Did, text, altText, blob, resolution ?? (128, 128));
+			record = await CreatePostWithVideoAsync(session.PdsUrl, session.AccessJwt, session.Did, text, altText, blob, resolution ?? (128, 128), progress, ct);
 		} else {
-			record = await CreatePostWithImageAsync(session.PdsUrl, session.AccessJwt, session.Did, text, altText, blob);
+			record = await CreatePostWithImageAsync(session.PdsUrl, session.AccessJwt, session.Did, text, altText, blob, progress, ct);
 		}
 
-			string[] parts = record.Uri.Replace("at://", "").Split('/');
+		if (record == null) {
+			return null;
+		}
+
+		string[] parts = record.Uri.Replace("at://", "").Split('/');
 		if (parts.Length >= 3) {
 			return new Uri($"https://bsky.app/profile/{parts[0]}/post/{parts[2]}");
 		}

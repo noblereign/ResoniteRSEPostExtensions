@@ -5,21 +5,40 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
+using Elements.Core;
+
 using FFMpegCore;
 using FFMpegCore.Enums;
+
+using FrooxEngine;
 
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Formats.Webp;
 using SixLabors.ImageSharp.Metadata.Profiles.Xmp;
 using SixLabors.ImageSharp.Processing;
 
-using FrooxEngine;
-
 using Metadata = ResoniteScreenshotExtensions.Metadata;
 using RSE = ResoniteScreenshotExtensions.ResoniteScreenshotExtensions;
 
 namespace RSEPostExtensions;
-internal class Util {
+
+public enum EncoderChoice {
+	Nvenc,
+	Amf,
+	X264TwoPass,
+	OpenH264
+}
+public static class EncoderChoiceExtension {
+	public static string GetFriendlyName(this EncoderChoice status) => status switch {
+		EncoderChoice.Nvenc => "NVENC",
+		EncoderChoice.Amf => "AMF",
+		EncoderChoice.X264TwoPass => "x264",
+		EncoderChoice.OpenH264 => "OpenH264",
+		_ => status.ToString()
+	};
+}
+
+public static class Util {
 	private static readonly HttpClient _http = new();
 	private static readonly string[] Adjectives = [
 		"Swift", "Clever", "Brave", "Bright", "Calm", "Eager", "Kind", "Lively",
@@ -230,11 +249,23 @@ internal class Util {
 		return (worldName, worldOwner, worldUrl);
 	}
 
-	private enum EncoderChoice {
-		Nvenc,
-		Amf,
-		X264TwoPass,
-		OpenH264
+
+
+
+	public readonly record struct CompressionProgress(double Progress, string Stage);
+	private static void ReportEncodingProgress(
+	IProgress<CompressionProgress>? progress,
+	TimeSpan currentTime,
+	TimeSpan totalDuration,
+	double rangeStart,
+	double rangeEnd,
+	string stage) {
+		if (progress == null || totalDuration.TotalSeconds <= 0)
+			return;
+
+		double ratio = Math.Clamp(currentTime.TotalSeconds / totalDuration.TotalSeconds, 0.0, 1.0);
+		double mapped = rangeStart + (ratio * (rangeEnd - rangeStart));
+		progress.Report(new CompressionProgress(mapped, stage));
 	}
 
 	private static EncoderChoice SelectBestEncoder() {
@@ -282,7 +313,9 @@ internal class Util {
 	double targetMiB = 19,
 	int audioKbps = 96,
 	bool fixColorRange = true,
+	IProgress<CompressionProgress>? progress = null,
 	CancellationToken ct = default) {
+		progress?.Report(new CompressionProgress(1.0, "Analyzing..."));
 		long maxBytes = (long)(targetMiB * 1024 * 1024);
 		var inputInfo = new FileInfo(inputPath);
 
@@ -290,6 +323,7 @@ internal class Util {
 		double durationSeconds = mediaInfo.Duration.TotalSeconds;
 
 		if (!fixColorRange && inputInfo.Length <= maxBytes) {
+			progress?.Report(new CompressionProgress(1.0, "Completed"));
 			return (inputPath, false, GetVideoResolution(mediaInfo));
 		}
 
@@ -324,12 +358,14 @@ internal class Util {
 
 		try {
 			if (encoder == EncoderChoice.X264TwoPass) {
-				await EncodeTwoPassX264Async(inputPath, tempOutputPath, videoKbps, audioKbps, targetHeight, fixColorRange, ct).ConfigureAwait(false);
+				await EncodeTwoPassX264Async(inputPath, tempOutputPath, videoKbps, audioKbps, targetHeight, fixColorRange, mediaInfo.Duration, progress, ct).ConfigureAwait(false);
 			} else {
-				await EncodeSinglePassAsync(inputPath, tempOutputPath, encoder, videoKbps, audioKbps, targetHeight, fixColorRange, ct).ConfigureAwait(false);
+				await EncodeSinglePassAsync(inputPath, tempOutputPath, encoder, videoKbps, audioKbps, targetHeight, fixColorRange, mediaInfo.Duration, progress, ct).ConfigureAwait(false);
 			}
 
+			progress?.Report(new CompressionProgress(0.99, "Finalizing..."));
 			IMediaAnalysis finalMediaInfo = await FFProbe.AnalyseAsync(tempOutputPath, cancellationToken: ct).ConfigureAwait(false);
+			progress?.Report(new CompressionProgress(1.0, "Completed"));
 			return (tempOutputPath, true, GetVideoResolution(finalMediaInfo));
 		} catch {
 			if (File.Exists(tempOutputPath)) {
@@ -347,10 +383,12 @@ internal class Util {
 		int audioKbps,
 		int? targetHeight,
 		bool fixColorRange,
+		TimeSpan totalDuration,
+		IProgress<CompressionProgress>? progress,
 		CancellationToken ct) {
 		if (encoder == EncoderChoice.Nvenc && !fixColorRange) {
 			try {
-				await EncodeNvencFullCudaAsync(inputPath, outputPath, videoKbps, audioKbps, targetHeight, ct).ConfigureAwait(false);
+				await EncodeNvencFullCudaAsync(inputPath, outputPath, videoKbps, audioKbps, targetHeight, totalDuration, progress, ct).ConfigureAwait(false);
 				return;
 			} catch (Exception e) {
 				RSEPostExtensions.Warn($"Full CUDA compression had an exception, falling back to partial NVENC compression: {e.Message}");
@@ -399,6 +437,7 @@ internal class Util {
 					.WithFastStart()
 					.WithCustomArgument($"-threads 2 -maxrate {(int)(videoKbps * 1.15)}k -bufsize {videoKbps * 2}k");
 			})
+			.NotifyOnProgress(time => ReportEncodingProgress(progress, time, totalDuration, 0.05, 0.98, $"Re-encoding with {encoder.GetFriendlyName()}"))
 			.CancellableThrough(ct)
 			.ProcessAsynchronously()
 			.ConfigureAwait(false);
@@ -411,6 +450,8 @@ internal class Util {
 		int audioKbps,
 		int? targetHeight,
 		bool fixColorRange,
+		TimeSpan totalDuration,
+		IProgress<CompressionProgress>? progress,
 		CancellationToken ct) {
 		string passLogPrefix = Path.Combine(Path.GetTempPath(), $"RSEPostExtensions_x264_{Guid.NewGuid():N}");
 		string nullTarget = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "NUL" : "/dev/null"; // hopefully works on linux?? no clue about the like 3 mac users
@@ -436,6 +477,7 @@ internal class Util {
 					if (!string.IsNullOrEmpty(vfFilter))
 						options.WithCustomArgument($"-vf \"{vfFilter}\"");
 				})
+				.NotifyOnProgress(time => ReportEncodingProgress(progress, time, totalDuration, 0.05, 0.98, $"Re-encoding with x264 <size=60%>(pass 1 of 2)</size>"))
 				.CancellableThrough(ct)
 				.ProcessAsynchronously()
 				.ConfigureAwait(false);
@@ -460,6 +502,7 @@ internal class Util {
 					if (fixColorRange)
 						options.WithCustomArgument("-color_range tv -colorspace bt709 -color_primaries bt709 -color_trc bt709");
 				})
+				.NotifyOnProgress(time => ReportEncodingProgress(progress, time, totalDuration, 0.05, 0.98, $"Re-encoding with x264 <size=60%>(pass 2 of 2)</size>"))
 				.CancellableThrough(ct)
 				.ProcessAsynchronously()
 				.ConfigureAwait(false);
@@ -468,7 +511,15 @@ internal class Util {
 		}
 	}
 
-	private static async Task EncodeNvencFullCudaAsync(string inputPath, string outputPath, int videoKbps, int audioKbps, int? targetHeight, CancellationToken ct) {
+	private static async Task EncodeNvencFullCudaAsync(
+		string inputPath,
+		string outputPath,
+		int videoKbps,
+		int audioKbps,
+		int? targetHeight,
+		TimeSpan totalDuration,
+		IProgress<CompressionProgress>? progress, 
+		CancellationToken ct) {
 		await FFMpegArguments
 			.FromFileInput(inputPath, verifyExists: true, options => {
 				options.WithCustomArgument("-hwaccel cuda -hwaccel_output_format cuda");
@@ -486,6 +537,7 @@ internal class Util {
 					options.WithCustomArgument($"-vf \"scale_cuda=-2:{targetHeight.Value}:format=yuv420p\"");
 				}
 			})
+			.NotifyOnProgress(time => ReportEncodingProgress(progress, time, totalDuration, 0.05, 0.98, $"Re-encoding with CUDA"))
 			.CancellableThrough(ct)
 			.ProcessAsynchronously()
 			.ConfigureAwait(false);
@@ -503,10 +555,22 @@ internal class Util {
 	}
 
 
-	public static async Task<MemoryStream> CompressImageAsync(string filePath, double targetMiB = 9.5, int maxDimension = int.MaxValue, int webpQuality = 100, long maxPixels = long.MaxValue, Func<byte[], int, int, byte[]>? postProcess = null) {
+	public static async Task<MemoryStream> CompressImageAsync(
+		string filePath, 
+		double targetMiB = 9.5, 
+		int maxDimension = int.MaxValue, 
+		int webpQuality = 100, 
+		long maxPixels = long.MaxValue, 
+		Func<byte[], int, int, byte[]>? postProcess = null, 
+		IProgress<CompressionProgress>? progress = null,
+		CancellationToken ct = default) {
+
 		long maxBytes = (long)(targetMiB * 1024 * 1024);
 
-		using (Image image = await Image.LoadAsync(filePath)) {
+		progress?.Report(new CompressionProgress(1.0, "Initializing..."));
+		using (Image image = await Image.LoadAsync(filePath, ct)) {
+			progress?.Report(new CompressionProgress(0.15, "Checking image dimensions"));
+
 			// max dimension
 			int longestSide = Math.Max(image.Width, image.Height);
 			if (longestSide > maxDimension) {
@@ -537,7 +601,7 @@ internal class Util {
 						Quality = quality
 					};
 
-					await image.SaveAsync(compressedStream, encoder);
+					await image.SaveAsync(compressedStream, encoder, ct);
 					byte[] rawBytes = compressedStream.ToArray();
 
 					return postProcess != null
@@ -547,9 +611,11 @@ internal class Util {
 
 				// webp quality
 				int initialQuality = Math.Clamp(webpQuality, 0, 100);
+				progress?.Report(new CompressionProgress(0.25, $"Encoding image"));
 				byte[] bestBytes = await EncodeCandidateAsync(initialQuality);
 				if (bestBytes.Length <= maxBytes) {
 					RSEPostExtensions.Msg($"Completing with requested quality: {webpQuality}");
+					progress?.Report(new CompressionProgress(1.0, "Completed"));
 					return new MemoryStream(bestBytes);
 				}
 
@@ -559,8 +625,15 @@ internal class Util {
 				int high = initialQuality - 1;
 				byte[]? validFit = null;
 
+				int totalSearchSteps = Math.Max(1, (int)Math.Ceiling(Math.Log2(Math.Max(2, high - low + 2))));
+				int currentStep = 0;
+
 				while (low <= high) {
 					int mid = (low + high) / 2;
+					double stepProgress = 0.35 + (Math.Min(currentStep, totalSearchSteps) / (double)totalSearchSteps) * 0.50;
+					progress?.Report(new CompressionProgress(stepProgress, $"Finding optimal compression level"));
+					currentStep++;
+
 					byte[] candidate = await EncodeCandidateAsync(mid);
 
 					if (candidate.Length <= maxBytes) {
@@ -573,6 +646,7 @@ internal class Util {
 
 				if (validFit != null) {
 					RSEPostExtensions.Msg($"Completing with reduced quality: {initialQuality} --> {low - 1}");
+					progress?.Report(new CompressionProgress(1.0, "Completed"));
 					return new MemoryStream(validFit);
 				}
 
@@ -581,21 +655,36 @@ internal class Util {
 				int initialHeight = image.Height;
 
 				int stepQuality = Math.Min(45, initialQuality);
+
+				int maxDimNow = Math.Max(image.Width, image.Height);
+				int totalScaleSteps = maxDimNow > 480
+				? Math.Max(1, (int)Math.Ceiling(Math.Log(480.0 / maxDimNow) / Math.Log(0.75)))
+				: 1;
+				int scaleStep = 0;
+
 				while (Math.Max(image.Width, image.Height) > 480) {
 					int nextWidth = Math.Max(1, (int)(image.Width * 0.75));
 					int nextHeight = Math.Max(1, (int)(image.Height * 0.75));
+					double scaleProgress = 0.85 + (Math.Min(scaleStep, totalScaleSteps) / (double)totalScaleSteps) * 0.13;
+					progress?.Report(new CompressionProgress(scaleProgress, $"Finding optimal image resolution"));
+					scaleStep++;
+
 					image.Mutate(x => x.Resize(nextWidth, nextHeight));
 
 					byte[] scaledCandidate = await EncodeCandidateAsync(stepQuality);
 					if (scaledCandidate.Length <= maxBytes) {
 						RSEPostExtensions.Msg($"Completing with reduced quality and resolution. R: {initialWidth}x{initialHeight} --> {nextWidth}x{nextHeight} Q: {initialQuality} --> {stepQuality}");
+						progress?.Report(new CompressionProgress(1.0, "Completed"));
 						return new MemoryStream(scaledCandidate);
 					}
 				}
 
 				// HEEEELP!!! HELP MEEEE!!! HEEEEEELP
 				RSEPostExtensions.Warn($"Completing with a minimum quality image, this still might not be enough to fit within {maxBytes} bytes!!!");
-				return new MemoryStream(await EncodeCandidateAsync(minQuality));
+				progress?.Report(new CompressionProgress(0.98, $"Compression trials exhausted, encoding at minimum quality 😭"));
+				byte[] minFallback = await EncodeCandidateAsync(minQuality);
+				progress?.Report(new CompressionProgress(1.0, "Completed, but at what cost?"));
+				return new MemoryStream(minFallback);
 			}
 		}
 	}

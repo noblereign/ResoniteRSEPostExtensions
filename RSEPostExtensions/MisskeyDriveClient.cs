@@ -2,6 +2,9 @@
 using System.Net.Http.Json;
 using System.Text.Json.Serialization;
 
+using static RSEPostExtensions.RSEPostExtensions;
+using static RSEPostExtensions.Util;
+
 namespace RSEPostExtensions;
 
 public class MisskeyDriveClient {
@@ -48,10 +51,12 @@ public class MisskeyDriveClient {
 	};
 
 	public static async Task<DriveFolder?> GetOrCreateFolderAsync(
-		Uri instanceUrl,
-		string token,
-		string folderName,
-		string? parentId = null) {
+	Uri instanceUrl,
+	string token,
+	string folderName,
+	string? parentId = null,
+	IProgress<CompressionProgress>? progress = null,
+	CancellationToken ct = default) {
 
 		Uri baseUri = new(instanceUrl.AbsoluteUri.TrimEnd('/') + "/");
 		Uri findEndpoint = new(baseUri, "api/drive/folders/find");
@@ -59,36 +64,40 @@ public class MisskeyDriveClient {
 
 		var payload = new { name = folderName, parentId };
 
+		progress?.Report(new CompressionProgress(1.0, "Locating folder"));
 		using var findReq = new HttpRequestMessage(HttpMethod.Post, findEndpoint);
 		findReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 		findReq.Content = JsonContent.Create(payload);
 
-		using var findRes = await _http.SendAsync(findReq);
+		using var findRes = await _http.SendAsync(findReq, ct);
 		await EnsureSuccessWithBodyAsync(findRes);
 
-		var folders = await findRes.Content.ReadFromJsonAsync<DriveFolder[]>();
+		var folders = await findRes.Content.ReadFromJsonAsync<DriveFolder[]>(cancellationToken: ct);
 		if (folders?.FirstOrDefault() is { } existing) return existing;
 
+		progress?.Report(new CompressionProgress(1.0, "Creating folder"));
 		using var createReq = new HttpRequestMessage(HttpMethod.Post, createEndpoint);
 		createReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 		createReq.Content = JsonContent.Create(payload);
 
-		using var createRes = await _http.SendAsync(createReq);
+		using var createRes = await _http.SendAsync(createReq, ct);
 		await EnsureSuccessWithBodyAsync(createRes);
 
-		return await createRes.Content.ReadFromJsonAsync<DriveFolder>();
+		return await createRes.Content.ReadFromJsonAsync<DriveFolder>(cancellationToken: ct);
 	}
 
 	public static async Task<DriveFile?> UploadFileAsync(
-		Uri instanceUrl,
-		string token,
-		string localFilePath,
-		bool isVideo,
-		string? folderId = null,
-		string? name = null,
-		string? comment = null,
-		bool isSensitive = false,
-		bool force = false) {
+	Uri instanceUrl,
+	string token,
+	string localFilePath,
+	bool isVideo,
+	string? folderId = null,
+	string? name = null,
+	string? comment = null,
+	bool isSensitive = false,
+	bool force = false,
+	IProgress<CompressionProgress>? progress = null,
+	CancellationToken ct = default) {
 
 		Uri baseUri = new(instanceUrl.AbsoluteUri.TrimEnd('/') + "/");
 		Uri uploadEndpoint = new(baseUri, "api/drive/files/create");
@@ -97,13 +106,23 @@ public class MisskeyDriveClient {
 		request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
 		using var form = new MultipartFormDataContent();
-
-		var fileStream = File.OpenRead(localFilePath);
-		var fileContent = new StreamContent(fileStream);
+		using var fileStream = File.OpenRead(localFilePath);
 
 		(string mimeType, string ext) = isVideo ? Util.GuessVideoMimeType(fileStream) : Util.GuessImageMimeType(fileStream);
 		fileStream.Position = 0;
 
+		var fileContent = new ProgressiveStreamContent(fileStream, (sent, total) => {
+			if (progress == null || total <= 0)
+				return;
+
+			if (sent >= total) {
+				progress.Report(new CompressionProgress(1.0, "Validating..."));
+				return;
+			}
+
+			double ratio = Math.Clamp((double)sent / total, 0.0, 0.99);
+			progress.Report(new CompressionProgress(ratio, "Uploading..."));
+		});
 		fileContent.Headers.ContentType = new MediaTypeHeaderValue(mimeType);
 
 		string fileName = name ?? Path.GetFileName(localFilePath);
@@ -126,12 +145,12 @@ public class MisskeyDriveClient {
 
 		request.Content = form;
 
-		using var response = await _http.SendAsync(request);
+		using var response = await _http.SendAsync(request, ct);
 		await EnsureSuccessWithBodyAsync(response);
 
-		return await response.Content.ReadFromJsonAsync<DriveFile>();
+		return await response.Content.ReadFromJsonAsync<DriveFile>(cancellationToken: ct);
 	}
-	
+
 	public static async Task<string> GetHumanReadableDriveUsageAsync(Uri instanceUrl, string token) {
 		Uri baseUri = new(instanceUrl.AbsoluteUri.TrimEnd('/') + "/");
 		Uri endpoint = new(baseUri, "api/drive");

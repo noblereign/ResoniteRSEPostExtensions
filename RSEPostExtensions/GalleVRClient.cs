@@ -3,8 +3,13 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+
 using Elements.Core;
+
 using FrooxEngine;
+
+using static RSEPostExtensions.RSEPostExtensions;
+using static RSEPostExtensions.Util;
 
 namespace RSEPostExtensions;
 
@@ -188,7 +193,11 @@ public class GalleVRClient {
 	private static string? _cachedAccessKey;
 	private static IReadOnlyList<string>? _cachedBadges;
 
-	public static async Task<IReadOnlyList<string>?> GetBadgesAsync(string accessKey, bool forceRefresh = false, CancellationToken ct = default) {
+	public static async Task<IReadOnlyList<string>?> GetBadgesAsync(
+		string accessKey,
+		bool forceRefresh = false,
+		IProgress<CompressionProgress>? progress = null,
+		CancellationToken ct = default) {
 		if (string.IsNullOrWhiteSpace(accessKey))
 			return null;
 
@@ -202,7 +211,7 @@ public class GalleVRClient {
 				return _cachedBadges;
 			}
 
-			List<string>? fetched = await FetchBadgesFromApiAsync(accessKey, forceRefresh, ct).ConfigureAwait(false);
+			List<string>? fetched = await FetchBadgesFromApiAsync(accessKey, forceRefresh, progress, ct).ConfigureAwait(false);
 			if (fetched != null) {
 				_cachedAccessKey = accessKey;
 				_cachedBadges = fetched;
@@ -219,8 +228,14 @@ public class GalleVRClient {
 		_cachedBadges = null;
 	}
 
-	private static async Task<List<string>?> FetchBadgesFromApiAsync(string accessKey, bool forceRefresh, CancellationToken ct) {
+	private static async Task<List<string>?> FetchBadgesFromApiAsync(
+		string accessKey,
+		bool forceRefresh,
+		IProgress<CompressionProgress>? progress,
+		CancellationToken ct) {
 		try {
+			progress?.Report(new CompressionProgress(1.0, "Checking tier"));
+
 			string url = forceRefresh
 				? "https://api.gallevr.app/vrchat/auth/me?cache=false"
 				: "https://api.gallevr.app/vrchat/auth/me";
@@ -257,7 +272,8 @@ public class GalleVRClient {
 
 				RSEPostExtensions.Msg($"Cached badges for session: [{string.Join(", ", badges)}]");
 				return badges;
-			};
+			}
+			;
 		} catch (Exception ex) {
 			RSEPostExtensions.Error($"Error fetching user badges:\n{ex}");
 			return null;
@@ -269,7 +285,9 @@ public class GalleVRClient {
 		string token,
 		string localFilePath,
 		GalleVRPhotoMetadata metadata,
-		PhotoMetadata photo) {
+		PhotoMetadata photo,
+		IProgress<CompressionProgress>? progress = null,
+		CancellationToken ct = default) {
 
 		var queryParams = new Dictionary<string, string> {
 			{ "user", userId },
@@ -286,7 +304,7 @@ public class GalleVRClient {
 		request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 		request.Headers.Add("metadata", metadata.ToBase64Header());
 
-		IReadOnlyList<string>? badges = await GetBadgesAsync(token);
+		IReadOnlyList<string>? badges = await GetBadgesAsync(token, progress: progress, ct: ct);
 		Tier tier = GetTier(badges);
 		RSEPostExtensions.Msg($"Compressing GalleVR image with {tier.Name} tier capabilities ({tier.MaxBytes} target size/{tier.MaxSize} longest side/{tier.MaxQuality} quality/{tier.MaxPixels} max pixels)");
 
@@ -298,18 +316,35 @@ public class GalleVRClient {
 			tier.MaxSize,
 			tier.MaxQuality,
 			tier.MaxPixels,
-			postProcess: (bytes, w, h) => Util.InjectXmp(bytes, photo, w, h)
+			postProcess: (bytes, w, h) => Util.InjectXmp(bytes, photo, w, h),
+			progress: progress,
+			ct: ct
 		)) {
-			StreamContent fileContent = new(fileStream);
+			fileStream.Position = 0;
+
+			var fileContent = new ProgressiveStreamContent(fileStream, (sent, total) => {
+				if (progress == null || total <= 0)
+					return;
+
+				if (sent >= total) {
+					progress.Report(new CompressionProgress(1.0, "Validating..."));
+					return;
+				}
+
+				double ratio = Math.Clamp((double)sent / total, 0.0, 0.99);
+				progress.Report(new CompressionProgress(ratio, "Uploading..."));
+			});
 			fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
 
 			request.Content = fileContent;
 
-			using (HttpResponseMessage response = await _http.SendAsync(request)) {
+			using (HttpResponseMessage response = await _http.SendAsync(request, ct)) {
 				await EnsureSuccessWithBodyAsync(response);
-				return await response.Content.ReadAsStringAsync();
-			};
-		};
+				return await response.Content.ReadAsStringAsync(ct);
+			}
+			;
+		}
+		;
 	}
 
 	private static async Task EnsureSuccessWithBodyAsync(HttpResponseMessage response) {
