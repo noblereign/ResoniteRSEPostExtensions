@@ -22,7 +22,7 @@ using ResoniteHotReloadLib;
 namespace RSEPostExtensions;
 
 public partial class RSEPostExtensions : ResoniteMod {
-	internal const string VERSION_CONSTANT = "5.0.0"; //Changing the version here updates it in all locations needed
+	internal const string VERSION_CONSTANT = "5.0.1"; //Changing the version here updates it in all locations needed
 	public override string Name => "RSEPostExtensions";
 	public override string Author => "Noble";
 	public override string Version => VERSION_CONSTANT;
@@ -232,6 +232,8 @@ public partial class RSEPostExtensions : ResoniteMod {
 			: null) ?? "";
 		string[] discordWebhookUrls = discordWebhookUrlStringList.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
+		bool isFallbackURL = (PEUrls == null && discordWebhookUrlStringList != "");
+
 		int webhookCount = 0;
 		foreach (string url in discordWebhookUrls) {
 			webhookCount++;
@@ -248,30 +250,62 @@ public partial class RSEPostExtensions : ResoniteMod {
 			Msg(serviceInfo.ServiceName);
 
 			ContextMenuItem menuItem = menu.AddItem(webhookName, serviceInfo.IconUri, serviceInfo.Color);
+			string uploadingStatus = "Posting...";
+			ButtonState currentState = ButtonState.Idle;
+			menuItem.Color.ActiveLink?.ReleaseLink();
 
-			bool isConfirming = false;
-			bool isUploaded = false;
+			void UpdateButtonVisuals() {
+				if (menuItem == null || menuItem.IsRemoved) return;
+				menuItem.Button.Enabled = currentState != ButtonState.Uploading;
+
+				switch (currentState) {
+					case ButtonState.Idle:
+						menuItem.Label.Target.Value = isFallbackURL ? $"{webhookName}\n<size=60%><alpha=#70>(from ResoniteScreenshotExtensions)" : webhookName;
+						menuItem.Color.Value = serviceInfo.Color;
+						break;
+					case ButtonState.Confirming:
+						menuItem.Label.Target.Value = $"<color=hero.red>Really post to </color><b>{webhookName}</b>?";
+						menuItem.Color.Value = serviceInfo.Color;
+						break;
+					case ButtonState.Uploading:
+						menuItem.Label.Target.Value = uploadingStatus;
+						menuItem.Color.Value = serviceInfo.Color;
+						break;
+					case ButtonState.Success:
+						menuItem.Label.Target.Value = $"Sent to {webhookName}\n<size=60%><color=#bcbcbc>Click to view message</color></size>";
+						menuItem.Color.Value = RadiantUI_Constants.Hero.GREEN;
+						break;
+					case ButtonState.Error:
+						menuItem.Label.Target.Value = $"<color=hero.red>Post Failed</color>\n<size=60%><color=#bcbcbc>Click to try again</color></size>";
+						menuItem.Color.Value = RadiantUI_Constants.Hero.RED;
+						break;
+				}
+			}
+			UpdateButtonVisuals();
 
 			menuItem.Button.LocalPressed += async (button, eventData) => {
-				if (!menuItem.Button.Enabled) return;
-				if (isUploaded) return;
-				menuItem.Color.Value = serviceInfo.Color;
-				if (Config!.GetValue(DoubleClickConfirm) && !isConfirming) {
-					isConfirming = true;
-					menuItem.Label.Target.Value = $"<color=hero.red>Really post to </color><b>{webhookName}</b>?";
+				if (currentState == ButtonState.Uploading || !menuItem.Button.Enabled) return;
+
+				if (currentState == ButtonState.Success) {
+					return;
+				}
+
+				if (Config!.GetValue(DoubleClickConfirm) && currentState == ButtonState.Idle) {
+					currentState = ButtonState.Confirming;
+					UpdateButtonVisuals();
 
 					menuItem.RunInSeconds(3f, () => {
-						if (isConfirming) {
-							isConfirming = false;
-							if (menuItem != null && !menuItem.IsRemoved && menuItem.Button.Enabled && !isUploaded) {
-								menuItem.Label.Target.Value = webhookName;
-							}
+						if (currentState == ButtonState.Confirming) {
+							currentState = ButtonState.Idle;
+							UpdateButtonVisuals();
 						}
 					});
 					return;
 				}
-				menuItem.Button.Enabled = false;
-				menuItem.Label.Target.Value = "<i>Preparing...";
+
+				uploadingStatus = "<i>Preparing...";
+				currentState = ButtonState.Uploading;
+				UpdateButtonVisuals();
 
 				int lastPercent = -1;
 				string? lastStage = null;
@@ -288,34 +322,39 @@ public partial class RSEPostExtensions : ResoniteMod {
 						return;
 
 					menuItem.RunSynchronously(() => {
-						if (menuItem == null || menuItem.IsDisposed || menuItem.IsDestroyed || menuItem.IsRemoved || !menuItem.IsValid)
+						if (currentState != ButtonState.Uploading || menuItem == null || menuItem.IsDisposed || menuItem.IsDestroyed || menuItem.IsRemoved || !menuItem.IsValid)
 							return;
 
-						menuItem.Label.Target.Value = p.Progress >= 1.0
+						uploadingStatus = p.Progress >= 1.0
 							? $"<i>{p.Stage}"
 							: $"<i>{p.Stage} ({percent}%)";
+						UpdateButtonVisuals();
 					});
 				});
 
 				Uri? postUrl = await PostToDiscord(metadata, new Uri(baseUrl), serviceInfo, progress);
+
 				if (menuItem != null && !menuItem.IsDisposed && !menuItem.IsDestroyed && !menuItem.IsRemoved && menuItem.IsValid
 				&& menuItem.Slot != null && !menuItem.Slot.IsDisposed && !menuItem.Slot.IsDestroyed && !menuItem.Slot.IsRemoved && menuItem.Slot.IsActive) {
 					menuItem.RunSynchronously(() => {
 						if (postUrl != null) {
-							isUploaded = true;
 							menuItem.Color.Value = RadiantUI_Constants.Hero.GREEN;
 							menuItem.Label.Target.Value = $"Sent to {webhookName}\n<size=60%><color=#bcbcbc>Click to view message</color></size>";
 							Hyperlink linkComponent = menuItem.Slot.AttachComponent<Hyperlink>();
 							linkComponent.URL.Value = postUrl;
 							linkComponent.Reason.Value = $"View your {serviceInfo.ServiceName} message";
-							menuItem.Button.Enabled = true;
 						} else {
 							menuItem.Label.Target.Value = $"<color=hero.red>Post Failed</color>\n<size=60%><color=#bcbcbc>Click to try again</color></size>";
 							menuItem.Color.Value = RadiantUI_Constants.Hero.RED;
 						}
+						menuItem.Button.Enabled = true;
 					});
 				} else {
-					NotificationMessage.SpawnTextMessage($"Media was posted to {serviceInfo.ServiceName}", RadiantUI_Constants.Hero.GREEN, NOTIF_DISTANCE, 2.5f, floatUpDistance: NOTIF_FLOATUP);
+					if (postUrl != null) {
+						NotificationMessage.SpawnTextMessage($"Media was posted to {serviceInfo.ServiceName}\n<size=60%>{webhookName}", RadiantUI_Constants.Hero.GREEN, NOTIF_DISTANCE, 2.5f, floatUpDistance: NOTIF_FLOATUP);
+					} else {
+						NotificationMessage.SpawnTextMessage($"Failed to post to {serviceInfo.ServiceName}!\n<size=60%>{webhookName}", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 2.5f, floatUpDistance: NOTIF_FLOATUP);
+					}
 				}
 			};
 		}
