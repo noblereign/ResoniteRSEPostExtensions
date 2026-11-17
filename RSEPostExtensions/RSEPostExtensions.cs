@@ -247,7 +247,6 @@ public partial class RSEPostExtensions : ResoniteMod {
 				{ } host when host.Contains("Fluxer", StringComparison.OrdinalIgnoreCase) => new("Fluxer", FLUXER_URI, colorX.FromHexCode("#4641D9"), 25f),
 				_ => new("Webhook", WEBHOOK_URI, colorX.White, 20f)
 			};
-			Msg(serviceInfo.ServiceName);
 
 			ContextMenuItem menuItem = menu.AddItem(webhookName, serviceInfo.IconUri, serviceInfo.Color);
 			string uploadingStatus = "Posting...";
