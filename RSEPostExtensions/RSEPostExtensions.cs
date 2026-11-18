@@ -22,7 +22,7 @@ using ResoniteHotReloadLib;
 namespace RSEPostExtensions;
 
 public partial class RSEPostExtensions : ResoniteMod {
-	internal const string VERSION_CONSTANT = "5.0.1"; //Changing the version here updates it in all locations needed
+	internal const string VERSION_CONSTANT = "5.0.2"; //Changing the version here updates it in all locations needed
 	public override string Name => "RSEPostExtensions";
 	public override string Author => "Noble";
 	public override string Version => VERSION_CONSTANT;
@@ -431,181 +431,216 @@ public partial class RSEPostExtensions : ResoniteMod {
 			_ => ("A", "", "photo", "selfie")
 		} : ("A", "", "video", "video");
 
-		float fovRad = photometa?.CameraFOV.Value * (MathF.PI / 180f) ?? 70;
-		float tanHalfFov = MathF.Tan(fovRad / 2f);
+		Texture2D? asset = metadata.Slot.GetComponent<TextureExportable>()?.Texture.Target?.Asset;
+		float aspectRatio = (asset != null && asset.Size.y > 0)
+			? asset.Size.x / (float)asset.Size.y
+			: 16f / 9f;
+
+		float fovDeg = (photometa != null && photometa.CameraFOV.Value > 0f && photometa.CameraFOV.Value < 179f)
+		? photometa.CameraFOV.Value
+		: 70f;
+
+		float halfFovY = fovDeg * (MathF.PI / 180f) * 0.5f;
+		float tanHalfFovY = MathF.Tan(halfFovY);
+		float tanHalfFovX = tanHalfFovY * aspectRatio;
+		float cosHalfFovY = MathF.Cos(halfFovY);
+		float cosHalfFovX = MathF.Cos(MathF.Atan(tanHalfFovX));
 
 		string altText = $"{article} {lensType}{standardType} from Resonite, taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName)}.";
 
 		if (photometa != null) { // only do advanced alt text for photos 
-			if (extendedTagSlot != null) {
-				DynamicVariableSpace extendedTagSpace = extendedTagSlot.FindSpace("PhotoMetadata");
-				if (extendedTagSpace != null) {
+			DynamicVariableSpace? extendedTagSpace = extendedTagSlot?.FindSpace("PhotoMetadata");
 
-					List<(string uid, string username, float screenX, float distance)> usersData = [];
-					bool isSelfie = false;
+			List<(string uid, string username, float screenX, float distance)> usersData = [];
+			bool isSelfie = false;
+			bool is360 = metadata.Is360.Value || (photometa != null && photometa.CameraFOV.Value >= 179f);
 
-					Msg("Processing extended tags...");
-					foreach (AssetMetadata.UserInfo userInfo in metadata.UserInfos) {
-						string uid = userInfo.User._userId.Value;
-						bool isInView = true; // we would rather tag people if FixPhotoMetadata isnt installed
-						float headScale = 1.0f;
+			Msg("Processing extended tags...");
+			foreach (AssetMetadata.UserInfo userInfo in metadata.UserInfos) {
+				string uid = userInfo.User._userId.Value;
 
-						if (extendedTagSlot != null && extendedTagSpace != null) {
-							bool viewTagFound = extendedTagSpace.TryReadValue<bool>($"{uid}.isInView", out isInView);
-							if (!viewTagFound) {
-								// user might be using older version of FixPhotoMetadata... (https://github.com/BlueberryWolf/FixPhotoMetadata/issues/1)
-								// work around by scanning components directly instead :')
-								Slot? userTagSlot = extendedTagSlot.FindChild(uid);
+				bool isLikelyHeadless = (
+					uid == metadata.LocationHost._userId && 
+					userInfo.HeadPosition.Value == float3.Zero && 
+					userInfo.HeadOrientation.Value == floatQ.Identity && 
+					!userInfo.IsInVR.Value &&
+					!userInfo.IsPresent);
 
-								if (userTagSlot != null) {
-									DynamicValueVariable<bool>? isInViewComponent = userTagSlot.GetComponents<DynamicValueVariable<bool>>().FirstOrDefault(v => v.VariableName.Value.Contains("isInView"));
-									if (isInViewComponent != null) {
-										isInView = isInViewComponent.Value.Value;
-									}
+				float3 userPos = userInfo.HeadPosition;
+				float3 toUser = userPos - metadata.TakenGlobalPosition.Value;
+				floatQ inverseCamRot = metadata.TakenGlobalRotation.Value.Inverted;
+				float3 localPos = inverseCamRot * toUser;
+
+				float distance = is360 ? localPos.Magnitude : localPos.z;
+
+				bool isInView = !isLikelyHeadless && (distance > 0.05f); // we would rather tag people if FixPhotoMetadata isnt installed
+				float headScale = 1.0f;
+
+				if (isInView) {
+					bool viewTagFound = false;
+
+					if (extendedTagSlot != null && extendedTagSpace != null) {
+						Slot? userTagSlot = null;
+
+						viewTagFound = extendedTagSpace.TryReadValue<bool>($"{uid}.isInView", out isInView);
+						if (!viewTagFound) {
+							// user might be using older version of FixPhotoMetadata... (https://github.com/BlueberryWolf/FixPhotoMetadata/issues/1)
+							// work around by scanning components directly instead :')
+							userTagSlot ??= extendedTagSlot.FindChild(uid);
+
+							if (userTagSlot != null) {
+								DynamicValueVariable<bool>? isInViewComponent = userTagSlot.GetComponents<DynamicValueVariable<bool>>().FirstOrDefault(v => v.VariableName.Value.Contains("isInView"));
+								if (isInViewComponent != null) {
+									isInView = isInViewComponent.Value.Value;
 								}
 							}
+						}
 
-							bool scaleTagFound = extendedTagSpace.TryReadValue<float>($"{uid}.headScale", out headScale);
-							if (!scaleTagFound) {
-								// user might be using older version of FixPhotoMetadata... (https://github.com/BlueberryWolf/FixPhotoMetadata/issues/1)
-								// work around by scanning components directly instead :')
-								Slot? userTagSlot = extendedTagSlot.FindChild(uid);
+						bool scaleTagFound = extendedTagSpace.TryReadValue<float>($"{uid}.headScale", out headScale);
+						if (!scaleTagFound) {
+							// user might be using older version of FixPhotoMetadata... (https://github.com/BlueberryWolf/FixPhotoMetadata/issues/1)
+							// work around by scanning components directly instead :')
+							userTagSlot ??= extendedTagSlot.FindChild(uid);
 
-								if (userTagSlot != null) {
-									DynamicValueVariable<float>? headScaleComponent = userTagSlot.GetComponents<DynamicValueVariable<float>>().FirstOrDefault(v => v.VariableName.Value.Contains("headScale"));
-									if (headScaleComponent != null) {
-										headScale = headScaleComponent.Value.Value;
-									}
+							if (userTagSlot != null) {
+								DynamicValueVariable<float>? headScaleComponent = userTagSlot.GetComponents<DynamicValueVariable<float>>().FirstOrDefault(v => v.VariableName.Value.Contains("headScale"));
+								if (headScaleComponent != null) {
+									headScale = headScaleComponent.Value.Value;
 								}
 							}
 						}
+					}
 
-						float3 userPos = userInfo.HeadPosition;
-						float3 toUser = userPos - metadata.TakenGlobalPosition.Value;
-						floatQ inverseCamRot = metadata.TakenGlobalRotation.Value.Inverted;
-						float3 localPos = inverseCamRot * toUser;
+					// assuming heads are at most .3 meters
+					float actualHeadSize = 0.3f * headScale;
 
-						// discard users who are definitely not visible in the photo
-						if (localPos.z > 0.05f) {
-							// assuming heads are at most .3 meters
-							float actualHeadSize = 0.3f * headScale;
+					if (isInView && !viewTagFound && !is360) {
+						float maxX = (localPos.z * tanHalfFovX) + (actualHeadSize / cosHalfFovX);
+						float maxY = (localPos.z * tanHalfFovY) + (actualHeadSize / cosHalfFovY);
 
-							float viewHeightAtDepth = 2f * localPos.z * MathF.Tan(fovRad / 2f);
-							float screenCoverage = actualHeadSize / viewHeightAtDepth;
-
-							if (screenCoverage < 0.015f) {
-								isInView = false;
-							}
-						}
-
-						if (isInView) {
-							string username = await Util.GetUsernameFromUserId(uid, metadata.World);
-
-							if (uid == metadata.TakenBy._userId.Value) {
-								isSelfie = true;
-							}
-
-							float tanTheta = localPos.x / localPos.z;
-							float screenX = tanTheta / tanHalfFov;
-
-							usersData.Add((uid, username, screenX, localPos.z));
+						if (MathF.Abs(localPos.x) > maxX || MathF.Abs(localPos.y) > maxY) {
+							isInView = false;
 						}
 					}
 
-					string JoinSegments(List<string> segs) {
-						if (segs.Count == 0) return "";
-						if (segs.Count == 1) return segs[0];
-						if (segs.Count == 2) return $"{segs[0]} and {segs[1]}";
-						return $"{string.Join(", ", segs.Take(segs.Count - 1))}, and {segs.Last()}";
-					}
 
-					string FormatPositions(List<(string uid, string username, float screenX, float distance)> users) {
-						var left = users.Where(u => u.screenX < -0.3f).Select(u => u.username).ToList();
-						var center = users.Where(u => u.screenX >= -0.3f && u.screenX <= 0.3f).Select(u => u.username).ToList();
-						var right = users.Where(u => u.screenX > 0.3f).Select(u => u.username).ToList();
+					// discard users who are definitely not visible in the photo
+					if (localPos.z > 0.05f) {
+						float viewHeightAtDepth = is360 ? MathF.PI * distance : 2f * localPos.z * tanHalfFovY;
+						float screenCoverage = actualHeadSize / viewHeightAtDepth;
 
-						List<string> segments = [];
-						if (left.Count > 0) segments.Add($"{JoinSegments(left)} on the left");
-						if (center.Count > 0) segments.Add($"{JoinSegments(center)} in the center");
-						if (right.Count > 0) segments.Add($"{JoinSegments(right)} on the right");
-
-						return JoinSegments(segments);
-					}
-
-					// if it's a solo selfie then don't bother mentioning where they are
-					if (usersData.Count == 1 && usersData[0].uid == metadata.TakenBy._userId) {
-						usersData.Clear();
-					}
-
-					int totalUsers = usersData.Count;
-					string crowdText = totalUsers >= 5 ? $". {totalUsers} users are visible in the photo" : "";
-					string baseText = $"{article} {lensType}{(isSelfie ? selfieType : standardType)} from Resonite, taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName)}{crowdText}.";
-
-					float depthThreshold = photometa.CameraFOV.Value switch {
-						>= 179f => 2.0f,
-						> 85f => 2.5f,
-						> 65f => 3.0f,
-						< 40f => 6.0f,
-						_ => 4.0f
-					};
-
-					var foregroundUsers = usersData.Where(u => u.distance < depthThreshold).ToList();
-					var backgroundUsers = usersData.Where(u => u.distance >= depthThreshold).ToList();
-
-					string subjectText = "";
-					float togetherThreshold = 1f;
-					string shotWord = isSelfie ? "shot" : "photo";
-
-					int fgLimit = 6;
-					int totalLimit = 10;
-
-					if (totalUsers == 0) {
-						subjectText = "";
-					} else if (foregroundUsers.Count > fgLimit) {
-						// theres absolutely too many people in this photo for alt text
-						subjectText = $"That's too many to list everyone individually.";
-					} else if (totalUsers > totalLimit) {
-						// list out foreground but not background because of crowding
-						if (foregroundUsers.Count > 0) {
-							bool fgTogether = foregroundUsers.Count == 2 && Math.Abs(foregroundUsers[0].screenX - foregroundUsers[1].screenX) < togetherThreshold;
-							string fgText = fgTogether
-								? $"{foregroundUsers[0].username} and {foregroundUsers[1].username} together"
-								: FormatPositions(foregroundUsers);
-
-							subjectText = $" It features {fgText}. In the background, there's a crowd of {backgroundUsers.Count} other users.";
-						} else {
-							subjectText = $" In the distance, there's a crowd of {backgroundUsers.Count} users.";
+						if (screenCoverage < 0.015f) {
+							isInView = false;
 						}
-					} else if (foregroundUsers.Count > 0 && backgroundUsers.Count == 0) {
-						// only foreground
-						bool fgTogether = foregroundUsers.Count == 2 && Math.Abs(foregroundUsers[0].screenX - foregroundUsers[1].screenX) < togetherThreshold;
-						subjectText = fgTogether
-							? $" {foregroundUsers[0].username} and {foregroundUsers[1].username} are together in the {shotWord}."
-							: $" It features {FormatPositions(foregroundUsers)}.";
-					} else if (foregroundUsers.Count == 0 && backgroundUsers.Count > 0) {
-						// only background
-						bool bgTogether = backgroundUsers.Count == 2 && Math.Abs(backgroundUsers[0].screenX - backgroundUsers[1].screenX) < togetherThreshold;
-						subjectText = bgTogether
-							? $" You can see {backgroundUsers[0].username} and {backgroundUsers[1].username} in the distance together."
-							: $" In the distance, you can see {FormatPositions(backgroundUsers)}.";
-					} else {
-						// mixed depth
-						bool fgTogether = foregroundUsers.Count == 2 && Math.Abs(foregroundUsers[0].screenX - foregroundUsers[1].screenX) < togetherThreshold;
-						string fgText = fgTogether
-							? $"{foregroundUsers[0].username} and {foregroundUsers[1].username} together"
-							: FormatPositions(foregroundUsers);
+					}
+				}
 
-						bool bgTogether = backgroundUsers.Count == 2 && Math.Abs(backgroundUsers[0].screenX - backgroundUsers[1].screenX) < togetherThreshold;
-						string bgText = bgTogether
-							? $"{backgroundUsers[0].username} and {backgroundUsers[1].username} together"
-							: FormatPositions(backgroundUsers);
+				if (isInView) {
+					string username = await Util.GetUsernameFromUserId(uid, metadata.World);
 
-						subjectText = $" It features {fgText}. In the background, you can spot {bgText}.";
+					if (uid == metadata.TakenBy._userId.Value) {
+						isSelfie = true;
 					}
 
-					altText = $"{baseText}{subjectText}";
+					float tanTheta = localPos.x / localPos.z;
+					float screenX = is360 ? MathF.Atan2(localPos.x, localPos.z) / MathF.PI : (localPos.x / localPos.z) / tanHalfFovX;
+
+					usersData.Add((uid, username, screenX, distance));
 				}
 			}
+
+			string JoinSegments(List<string> segs) {
+				if (segs.Count == 0) return "";
+				if (segs.Count == 1) return segs[0];
+				if (segs.Count == 2) return $"{segs[0]} and {segs[1]}";
+				return $"{string.Join(", ", segs.Take(segs.Count - 1))}, and {segs.Last()}";
+			}
+
+			string FormatPositions(List<(string uid, string username, float screenX, float distance)> users) {
+				var left = users.Where(u => u.screenX < -0.3f).Select(u => u.username).ToList();
+				var center = users.Where(u => u.screenX >= -0.3f && u.screenX <= 0.3f).Select(u => u.username).ToList();
+				var right = users.Where(u => u.screenX > 0.3f).Select(u => u.username).ToList();
+
+				List<string> segments = [];
+				if (left.Count > 0) segments.Add($"{JoinSegments(left)} on the left");
+				if (center.Count > 0) segments.Add($"{JoinSegments(center)} in the center");
+				if (right.Count > 0) segments.Add($"{JoinSegments(right)} on the right");
+
+				return JoinSegments(segments);
+			}
+
+			// if it's a solo selfie then don't bother mentioning where they are
+			if (usersData.Count == 1 && usersData[0].uid == metadata.TakenBy._userId) {
+				usersData.Clear();
+			}
+
+			int totalUsers = usersData.Count;
+			string crowdText = totalUsers >= 5 ? $". {totalUsers} users are visible in the photo" : "";
+			string baseText = $"{article} {lensType}{(isSelfie ? selfieType : standardType)} from Resonite, taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName)}{crowdText}.";
+
+			float depthThreshold = photometa?.CameraFOV.Value switch {
+				>= 179f => 2.0f,
+				> 85f => 2.5f,
+				> 65f => 3.0f,
+				< 40f => 6.0f,
+				_ => 4.0f
+			};
+
+			var foregroundUsers = usersData.Where(u => u.distance < depthThreshold).ToList();
+			var backgroundUsers = usersData.Where(u => u.distance >= depthThreshold).ToList();
+
+			string subjectText = "";
+			float togetherThreshold = 1f;
+			string shotWord = isSelfie ? "shot" : "photo";
+
+			int fgLimit = 6;
+			int totalLimit = 10;
+
+			if (totalUsers == 0) {
+				subjectText = "";
+			} else if (foregroundUsers.Count > fgLimit) {
+				// theres absolutely too many people in this photo for alt text
+				subjectText = $" That's too many to list everyone individually.";
+			} else if (totalUsers > totalLimit) {
+				// list out foreground but not background because of crowding
+				if (foregroundUsers.Count > 0) {
+					bool fgTogether = foregroundUsers.Count == 2 && Math.Abs(foregroundUsers[0].screenX - foregroundUsers[1].screenX) < togetherThreshold;
+					string fgText = fgTogether
+						? $"{foregroundUsers[0].username} and {foregroundUsers[1].username} together"
+						: FormatPositions(foregroundUsers);
+
+					subjectText = $" It features {fgText}. In the background, there's a crowd of {backgroundUsers.Count} other users.";
+				} else {
+					subjectText = $" In the distance, there's a crowd of {backgroundUsers.Count} users.";
+				}
+			} else if (foregroundUsers.Count > 0 && backgroundUsers.Count == 0) {
+				// only foreground
+				bool fgTogether = foregroundUsers.Count == 2 && Math.Abs(foregroundUsers[0].screenX - foregroundUsers[1].screenX) < togetherThreshold;
+				subjectText = fgTogether
+					? $" {foregroundUsers[0].username} and {foregroundUsers[1].username} are together in the {shotWord}."
+					: $" It features {FormatPositions(foregroundUsers)}.";
+			} else if (foregroundUsers.Count == 0 && backgroundUsers.Count > 0) {
+				// only background
+				bool bgTogether = backgroundUsers.Count == 2 && Math.Abs(backgroundUsers[0].screenX - backgroundUsers[1].screenX) < togetherThreshold;
+				subjectText = bgTogether
+					? $" You can see {backgroundUsers[0].username} and {backgroundUsers[1].username} in the distance together."
+					: $" In the distance, you can see {FormatPositions(backgroundUsers)}.";
+			} else {
+				// mixed depth
+				bool fgTogether = foregroundUsers.Count == 2 && Math.Abs(foregroundUsers[0].screenX - foregroundUsers[1].screenX) < togetherThreshold;
+				string fgText = fgTogether
+					? $"{foregroundUsers[0].username} and {foregroundUsers[1].username} together"
+					: FormatPositions(foregroundUsers);
+
+				bool bgTogether = backgroundUsers.Count == 2 && Math.Abs(backgroundUsers[0].screenX - backgroundUsers[1].screenX) < togetherThreshold;
+				string bgText = bgTogether
+					? $"{backgroundUsers[0].username} and {backgroundUsers[1].username} together"
+					: FormatPositions(backgroundUsers);
+
+				subjectText = $" It features {fgText}. In the background, you can spot {bgText}.";
+			}
+
+			altText = $"{baseText}{subjectText}";
 		}
 
 		return altText;
