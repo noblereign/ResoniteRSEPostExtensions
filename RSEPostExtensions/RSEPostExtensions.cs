@@ -424,7 +424,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 		PhotoMetadata? photometa = metadata as PhotoMetadata;
 
 		var (article, lensType, standardType, selfieType) = (photometa != null) ? photometa.CameraFOV.Value switch {
-			>= 179f => ("A", "360°", "capture ", "capture"),
+			>= 179f => ("A", "360° ", "capture", "capture"),
 			> 85f => ("An", "ultra-wide ", "photo", "selfie"),
 			> 65f => ("A", "wide-angle ", "photo", "selfie"),
 			< 40f => ("A", "telephoto ", "shot", "portrait"),
@@ -448,7 +448,9 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 		string altText = $"{article} {lensType}{standardType} from Resonite, taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName)}.";
 
-		if (photometa != null) { // only do advanced alt text for photos 
+		bool transformValid = metadata.TakenGlobalPosition.Value != float3.Zero || metadata.TakenGlobalRotation.Value != floatQ.Identity;
+
+		if (photometa != null && transformValid) { // only do advanced alt text for photos 
 			DynamicVariableSpace? extendedTagSpace = extendedTagSlot?.FindSpace("PhotoMetadata");
 
 			List<(string uid, string username, float screenX, float distance)> usersData = [];
@@ -525,7 +527,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 
 					// discard users who are definitely not visible in the photo
-					if (localPos.z > 0.05f) {
+					if (distance > 0.05f) {
 						float viewHeightAtDepth = is360 ? MathF.PI * distance : 2f * localPos.z * tanHalfFovY;
 						float screenCoverage = actualHeadSize / viewHeightAtDepth;
 
@@ -557,6 +559,10 @@ public partial class RSEPostExtensions : ResoniteMod {
 			}
 
 			string FormatPositions(List<(string uid, string username, float screenX, float distance)> users) {
+				if (is360) {
+					return JoinSegments([.. users.Select(u => u.username)]);
+				}
+
 				var left = users.Where(u => u.screenX < -0.3f).Select(u => u.username).ToList();
 				var center = users.Where(u => u.screenX >= -0.3f && u.screenX <= 0.3f).Select(u => u.username).ToList();
 				var right = users.Where(u => u.screenX > 0.3f).Select(u => u.username).ToList();
@@ -572,6 +578,10 @@ public partial class RSEPostExtensions : ResoniteMod {
 			// if it's a solo selfie then don't bother mentioning where they are
 			if (usersData.Count == 1 && usersData[0].uid == metadata.TakenBy._userId) {
 				usersData.Clear();
+			}
+
+			if (is360) {
+				usersData = [.. usersData.OrderBy(u => u.distance)];
 			}
 
 			int totalUsers = usersData.Count;
@@ -637,7 +647,9 @@ public partial class RSEPostExtensions : ResoniteMod {
 					? $"{backgroundUsers[0].username} and {backgroundUsers[1].username} together"
 					: FormatPositions(backgroundUsers);
 
-				subjectText = $" It features {fgText}. In the background, you can spot {bgText}.";
+				subjectText = is360
+					? $" It features {fgText} nearby, with {bgText} further away."
+					: $" It features {fgText}. In the background, you can spot {bgText}.";
 			}
 
 			altText = $"{baseText}{subjectText}";
