@@ -1,16 +1,17 @@
 ﻿using System.Collections.Concurrent;
 using System.Net.Http.Json;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
 using Elements.Core;
+using FrooxEngine;
+using SkyFrost.Base;
 
 using FFMpegCore;
 using FFMpegCore.Enums;
-
-using FrooxEngine;
 
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Formats.Webp;
@@ -170,14 +171,26 @@ public static class Util {
 		return ("application/octet-stream", ".mp4");
 	}
 
-	public static async Task<string> GetUsernameFromUserId(string userId, World? world) {
+	public static async Task<string> GetUsernameFromUserId(string userId, World? world, CancellationToken ct = default) {
+		if (ct.IsCancellationRequested) {
+			return userId;
+		}
+
 		if (world != null) {
-			User ingameUser = world.GetUserByUserId(userId);
+			FrooxEngine.User ingameUser = world.GetUserByUserId(userId);
 			if (ingameUser != null) {
 				return ingameUser.UserName;
 			}
 		}
-		var user = await Engine.Current.Cloud.Users.GetUser(userId);
+		CloudResult<SkyFrost.Base.User>? user;
+		Task<CloudResult<SkyFrost.Base.User>> userTask = Engine.Current.Cloud.Users.GetUser(userId);
+		
+		try {
+			user = await userTask.WaitAsync(ct);
+		} catch {
+			return userId;
+		}
+
 		if (user.IsOK)
 			return user.Entity.Username;
 		return userId;
@@ -196,7 +209,7 @@ public static class Util {
 		return locationUrl;
 	}
 
-	public static async Task<(string WorldName, string OwnerName, bool IsPublic)?> FetchWorldDetailsFromUrlAsync(Uri worldUrl) {
+	public static async Task<(string WorldName, string OwnerName, bool IsPublic)?> FetchWorldDetailsFromUrlAsync(Uri worldUrl, CancellationToken ct = default) {
 		try {
 			string[] parts = worldUrl.OriginalString.TrimEnd('/').Split('/');
 			if (parts.Length < 2) return null;
@@ -207,8 +220,10 @@ public static class Util {
 			string basePath = isGroup ? "groups" : "users";
 
 			string recordEndpoint = $"https://api.resonite.com/{basePath}/{ownerId}/records/{recordId}";
-			var recordData = await _http.GetFromJsonAsync<JsonElement>(recordEndpoint);
-
+			var recordData = await _http.GetFromJsonAsync<JsonElement>(recordEndpoint, ct);
+			if (ct.IsCancellationRequested) {
+				return null;
+			}
 			bool isPublic = false;
 			if (recordData.TryGetProperty("isPublic", out var pubProp)) {
 				isPublic = pubProp.GetBoolean();
@@ -217,7 +232,10 @@ public static class Util {
 			string worldName = recordData.GetProperty("name").GetString() ?? "A Resonite World";
 
 			string ownerEndpoint = $"https://api.resonite.com/{basePath}/{ownerId}";
-			var ownerData = await _http.GetFromJsonAsync<JsonElement>(ownerEndpoint);
+			var ownerData = await _http.GetFromJsonAsync<JsonElement>(ownerEndpoint, ct);
+			if (ct.IsCancellationRequested) {
+				return null;
+			}
 
 			string ownerProp = isGroup ? "name" : "username";
 			string ownerName = ownerData.GetProperty(ownerProp).GetString() ?? "Unknown Creator";
@@ -229,20 +247,20 @@ public static class Util {
 		}
 	}
 
-	public static async Task<(string worldName, string worldOwner, Uri? worldUrl)> GetWorldDetailsFromMetadataAsync(CameraMediaMetadataBase metadata) {
+	public static async Task<(string worldName, string worldOwner, Uri? worldUrl)> GetWorldDetailsFromMetadataAsync(CameraMediaMetadataBase metadata, CancellationToken ct = default) {
 		string worldName = "A Resonite World";
 		string worldOwner = "Unknown Creator";
 		Uri? worldUrl = ResrecToGoResonite(metadata.LocationURL.Value);
 
 		if (metadata.LocationURL.Value != null) {
-			var apiResult = await FetchWorldDetailsFromUrlAsync(metadata.LocationURL.Value);
+			var apiResult = await FetchWorldDetailsFromUrlAsync(metadata.LocationURL.Value, ct);
 
 			if (apiResult != null && apiResult.Value.IsPublic) {
 				worldName = apiResult.Value.WorldName;
 				worldOwner = apiResult.Value.OwnerName;
 			} else {
 				worldName = metadata.LocationName?.Value ?? "Unknown Location";
-				worldOwner = (metadata.LocationHost?._userId != null) ? await GetUsernameFromUserId(metadata.LocationHost._userId, metadata.World) : "Unknown Creator";
+				worldOwner = (metadata.LocationHost?._userId != null) ? await GetUsernameFromUserId(metadata.LocationHost._userId, metadata.World, ct) : "Unknown Creator";
 				worldUrl = null;
 			}
 		}
@@ -315,6 +333,7 @@ public static class Util {
 	bool fixColorRange = true,
 	IProgress<CompressionProgress>? progress = null,
 	CancellationToken ct = default) {
+		ct.ThrowIfCancellationRequested();
 		progress?.Report(new CompressionProgress(1.0, "Analyzing..."));
 		long maxBytes = (long)(targetMiB * 1024 * 1024);
 		var inputInfo = new FileInfo(inputPath);
@@ -699,5 +718,133 @@ public static class Util {
 			height,
 			isTransparent
 		);
+	}
+
+	private sealed class PhotoViewCache {
+		public readonly bool TransformValid;
+		public readonly bool Is360;
+		public readonly float AspectRatio;
+		public readonly float TanHalfFovY;
+		public readonly float TanHalfFovX;
+		public readonly float CosHalfFovY;
+		public readonly float CosHalfFovX;
+		public readonly float3 CamPos;
+		public readonly floatQ InverseCamRot;
+		public readonly Slot? ExtendedTagSlot;
+		public readonly DynamicVariableSpace? ExtendedTagSpace;
+		public readonly ConcurrentDictionary<string, (bool isInView, float headScale)> UserResults = new();
+
+		public PhotoViewCache(PhotoMetadata metadata, float aspectRatio, Slot? extendedTagSlot, DynamicVariableSpace? extendedTagSpace) {
+			TransformValid = metadata.TakenGlobalPosition.Value != float3.Zero
+				|| metadata.TakenGlobalRotation.Value != floatQ.Identity;
+			Is360 = metadata.Is360.Value || metadata.CameraFOV.Value >= 179f;
+			AspectRatio = aspectRatio;
+
+			float fovDeg = (metadata.CameraFOV.Value > 0f && metadata.CameraFOV.Value < 179f)
+				? metadata.CameraFOV.Value
+				: 70f;
+
+			float halfFovY = fovDeg * (MathF.PI / 180f) * 0.5f;
+			TanHalfFovY = MathF.Tan(halfFovY);
+			TanHalfFovX = TanHalfFovY * aspectRatio;
+			CosHalfFovY = MathF.Cos(halfFovY);
+			CosHalfFovX = MathF.Cos(MathF.Atan(TanHalfFovX));
+
+			CamPos = metadata.TakenGlobalPosition.Value;
+			InverseCamRot = metadata.TakenGlobalRotation.Value.Inverted;
+
+			ExtendedTagSlot = extendedTagSlot ?? metadata.Slot.FindChild("PhotoMetadata_Tags");
+			ExtendedTagSpace = extendedTagSpace ?? ExtendedTagSlot?.FindSpace("PhotoMetadata");
+		}
+	}
+
+	private static readonly ConditionalWeakTable<PhotoMetadata, PhotoViewCache> _viewCache = [];
+	public static (bool isInView, float headScale) IsUserInView(
+		PhotoMetadata metadata,
+		AssetMetadata.UserInfo userInfo,
+		float aspectRatio = 1.777777777777778f,
+		Slot? extendedTagSlot = null,
+		DynamicVariableSpace? extendedTagSpace = null) {
+		PhotoViewCache cache = _viewCache.GetValue(
+			metadata,
+			m => new PhotoViewCache(m, aspectRatio, extendedTagSlot, extendedTagSpace)
+		);
+
+		if (!cache.TransformValid) {
+			return (false, 1.0f);
+		}
+
+		string uid = userInfo.User._userId.Value;
+
+		return cache.UserResults.GetOrAdd(uid, _ => {
+			bool isLikelyHeadless = (
+				uid == metadata.LocationHost._userId &&
+				userInfo.HeadPosition.Value == float3.Zero &&
+				userInfo.HeadOrientation.Value == floatQ.Identity &&
+				!userInfo.IsInVR.Value &&
+				!userInfo.IsPresent);
+
+			float3 localPos = cache.InverseCamRot * (userInfo.HeadPosition.Value - cache.CamPos);
+			float distance = cache.Is360 ? localPos.Magnitude : localPos.z;
+
+			bool isInView = !isLikelyHeadless && (distance > 0.05f);
+			if (!isInView) {
+				return (false, 1.0f);
+			}
+
+			bool viewTagFound = false;
+			float headScale = 1.0f;
+
+			if (cache.ExtendedTagSlot != null && cache.ExtendedTagSpace != null) {
+				Slot? userTagSlot = null;
+
+				viewTagFound = cache.ExtendedTagSpace.TryReadValue<bool>($"{uid}.isInView", out isInView);
+				if (!viewTagFound) {
+					userTagSlot ??= cache.ExtendedTagSlot.FindChild(uid);
+					if (userTagSlot != null) {
+						DynamicValueVariable<bool>? isInViewComponent = userTagSlot
+							.GetComponents<DynamicValueVariable<bool>>()
+							.FirstOrDefault(v => v.VariableName.Value.Contains("isInView"));
+						if (isInViewComponent != null) {
+							isInView = isInViewComponent.Value.Value;
+							viewTagFound = true;
+						}
+					}
+				}
+
+				bool scaleTagFound = cache.ExtendedTagSpace.TryReadValue<float>($"{uid}.headScale", out headScale);
+				if (!scaleTagFound) {
+					userTagSlot ??= cache.ExtendedTagSlot.FindChild(uid);
+					if (userTagSlot != null) {
+						DynamicValueVariable<float>? headScaleComponent = userTagSlot
+							.GetComponents<DynamicValueVariable<float>>()
+							.FirstOrDefault(v => v.VariableName.Value.Contains("headScale"));
+						if (headScaleComponent != null) {
+							headScale = headScaleComponent.Value.Value;
+						}
+					}
+				}
+			}
+
+			float actualHeadSize = 0.3f * headScale;
+
+			if (isInView && !viewTagFound && !cache.Is360) {
+				float maxX = (localPos.z * cache.TanHalfFovX) + (actualHeadSize / cache.CosHalfFovX);
+				float maxY = (localPos.z * cache.TanHalfFovY) + (actualHeadSize / cache.CosHalfFovY);
+
+				if (MathF.Abs(localPos.x) > maxX || MathF.Abs(localPos.y) > maxY) {
+					isInView = false;
+				}
+			}
+
+			if (isInView && distance > 0.05f) {
+				float viewHeightAtDepth = cache.Is360 ? MathF.PI * distance : 2f * localPos.z * cache.TanHalfFovY;
+				if ((actualHeadSize / viewHeightAtDepth) < 0.015f) {
+					isInView = false;
+				}
+			}
+
+			return (isInView, headScale);
+		});
 	}
 }

@@ -239,7 +239,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 			webhookCount++;
 			string[] urlParts = url.Split('?');
 			string baseUrl = urlParts[0];
-			string webhookName = urlParts.Length > 1 ? urlParts[1] : $"#{webhookCount}<alpha=#77><size=75%> aka </alpha></size>{Util.GetMemorableName(baseUrl)}";
+			string webhookName = urlParts.Length > 1 ? urlParts[1] : $"#{webhookCount}<alpha=#77><size=75%> aka </alpha></size>{GetMemorableName(baseUrl)}";
 
 			Uri webhookUrl = new(baseUrl);
 			WebhookInfo serviceInfo = webhookUrl.Host switch {
@@ -371,15 +371,15 @@ public partial class RSEPostExtensions : ResoniteMod {
 		return builder.Uri;
 	}
 
-	static async Task<string> FormatPostBody(string template, CameraMediaMetadataBase metadata, string? apiWorldName, string? apiWorldOwner, string? worldUrl) {
+	static async Task<string> FormatPostBody(string template, CameraMediaMetadataBase metadata, string? apiWorldName, string? apiWorldOwner, string? worldUrl, CancellationToken ct = default) {
 		if (string.IsNullOrWhiteSpace(template)) return "";
 
 		var time = metadata.TimeTaken.Value.Kind == DateTimeKind.Utc ? metadata.TimeTaken.Value.ToLocalTime() : metadata.TimeTaken.Value;
 
 		static string Fallback(string? val) => string.IsNullOrWhiteSpace(val) ? "Unknown" : val;
 
-		string photographerName = await Util.GetUsernameFromUserId(metadata.TakenBy._userId, metadata.World);
-		string hostName = await Util.GetUsernameFromUserId(metadata.LocationHost._userId.Value, metadata.World);
+		string photographerName = await GetUsernameFromUserId(metadata.TakenBy._userId, metadata.World, ct);
+		string hostName = await GetUsernameFromUserId(metadata.LocationHost._userId.Value, metadata.World, ct);
 		string locationName = Fallback(RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName));
 
 		string resolvedWorldName = !string.IsNullOrWhiteSpace(apiWorldName) ? apiWorldName : locationName;
@@ -416,10 +416,16 @@ public partial class RSEPostExtensions : ResoniteMod {
 		return template;
 	}
 
-	private static async Task<string> AltTextFromMetadata(CameraMediaMetadataBase metadata) {
+	private static async Task<string> AltTextFromMetadata(CameraMediaMetadataBase metadata, IProgress<CompressionProgress>? progress = null, CancellationToken ct = default) {
 		Slot? extendedTagSlot = metadata.Slot.FindChild("PhotoMetadata_Tags");
+		List<AssetMetadata.UserInfo> validUserInfos = [.. metadata.UserInfos.Where(u => u.User._userId.Value != null)];
 
-		string photographerName = await Util.GetUsernameFromUserId(metadata.TakenBy._userId, metadata.World);
+		int userIdCount = 1 + (validUserInfos.Count);
+		int userIdsChecked = 0;
+
+		string photographerName = await GetUsernameFromUserId(metadata.TakenBy._userId, metadata.World, ct);
+		userIdsChecked++;
+		progress?.Report(new CompressionProgress(MathX.Clamp01((float)userIdsChecked / (float)userIdCount), "Gathering metadata..."));
 
 		PhotoMetadata? photometa = metadata as PhotoMetadata;
 
@@ -458,15 +464,9 @@ public partial class RSEPostExtensions : ResoniteMod {
 			bool is360 = metadata.Is360.Value || (photometa != null && photometa.CameraFOV.Value >= 179f);
 
 			Msg("Processing extended tags...");
-			foreach (AssetMetadata.UserInfo userInfo in metadata.UserInfos) {
-				string uid = userInfo.User._userId.Value;
 
-				bool isLikelyHeadless = (
-					uid == metadata.LocationHost._userId && 
-					userInfo.HeadPosition.Value == float3.Zero && 
-					userInfo.HeadOrientation.Value == floatQ.Identity && 
-					!userInfo.IsInVR.Value &&
-					!userInfo.IsPresent);
+			foreach (AssetMetadata.UserInfo userInfo in validUserInfos) {
+				string uid = userInfo.User._userId.Value;
 
 				float3 userPos = userInfo.HeadPosition;
 				float3 toUser = userPos - metadata.TakenGlobalPosition.Value;
@@ -475,70 +475,10 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 				float distance = is360 ? localPos.Magnitude : localPos.z;
 
-				bool isInView = !isLikelyHeadless && (distance > 0.05f); // we would rather tag people if FixPhotoMetadata isnt installed
-				float headScale = 1.0f;
+				(bool isInView, float headScale) = IsUserInView(photometa!, userInfo, aspectRatio, extendedTagSlot, extendedTagSpace);
 
 				if (isInView) {
-					bool viewTagFound = false;
-
-					if (extendedTagSlot != null && extendedTagSpace != null) {
-						Slot? userTagSlot = null;
-
-						viewTagFound = extendedTagSpace.TryReadValue<bool>($"{uid}.isInView", out isInView);
-						if (!viewTagFound) {
-							// user might be using older version of FixPhotoMetadata... (https://github.com/BlueberryWolf/FixPhotoMetadata/issues/1)
-							// work around by scanning components directly instead :')
-							userTagSlot ??= extendedTagSlot.FindChild(uid);
-
-							if (userTagSlot != null) {
-								DynamicValueVariable<bool>? isInViewComponent = userTagSlot.GetComponents<DynamicValueVariable<bool>>().FirstOrDefault(v => v.VariableName.Value.Contains("isInView"));
-								if (isInViewComponent != null) {
-									isInView = isInViewComponent.Value.Value;
-								}
-							}
-						}
-
-						bool scaleTagFound = extendedTagSpace.TryReadValue<float>($"{uid}.headScale", out headScale);
-						if (!scaleTagFound) {
-							// user might be using older version of FixPhotoMetadata... (https://github.com/BlueberryWolf/FixPhotoMetadata/issues/1)
-							// work around by scanning components directly instead :')
-							userTagSlot ??= extendedTagSlot.FindChild(uid);
-
-							if (userTagSlot != null) {
-								DynamicValueVariable<float>? headScaleComponent = userTagSlot.GetComponents<DynamicValueVariable<float>>().FirstOrDefault(v => v.VariableName.Value.Contains("headScale"));
-								if (headScaleComponent != null) {
-									headScale = headScaleComponent.Value.Value;
-								}
-							}
-						}
-					}
-
-					// assuming heads are at most .3 meters
-					float actualHeadSize = 0.3f * headScale;
-
-					if (isInView && !viewTagFound && !is360) {
-						float maxX = (localPos.z * tanHalfFovX) + (actualHeadSize / cosHalfFovX);
-						float maxY = (localPos.z * tanHalfFovY) + (actualHeadSize / cosHalfFovY);
-
-						if (MathF.Abs(localPos.x) > maxX || MathF.Abs(localPos.y) > maxY) {
-							isInView = false;
-						}
-					}
-
-
-					// discard users who are definitely not visible in the photo
-					if (distance > 0.05f) {
-						float viewHeightAtDepth = is360 ? MathF.PI * distance : 2f * localPos.z * tanHalfFovY;
-						float screenCoverage = actualHeadSize / viewHeightAtDepth;
-
-						if (screenCoverage < 0.015f) {
-							isInView = false;
-						}
-					}
-				}
-
-				if (isInView) {
-					string username = await Util.GetUsernameFromUserId(uid, metadata.World);
+					string username = await GetUsernameFromUserId(uid, metadata.World, ct);
 
 					if (uid == metadata.TakenBy._userId.Value) {
 						isSelfie = true;
@@ -549,6 +489,8 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 					usersData.Add((uid, username, screenX, distance));
 				}
+				userIdsChecked++;
+				progress?.Report(new CompressionProgress(MathX.Clamp01((float)userIdsChecked / (float)userIdCount), "Gathering metadata..."));
 			}
 
 			string JoinSegments(List<string> segs) {
@@ -655,6 +597,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 			altText = $"{baseText}{subjectText}";
 		}
 
+		progress?.Report(new CompressionProgress(1.0, "Gathering metadata..."));
 		return altText;
 	}
 
@@ -793,7 +736,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 			async Task UpdateManifestUIAsync() {
 				try {
-					WebManifest? manifest = await Util.GetManifestAsync(baseUrl);
+					WebManifest? manifest = await GetManifestAsync(baseUrl);
 					if (manifest == null) return;
 
 					menuItem.RunSynchronously(() => {
@@ -835,7 +778,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 			metadata.LocalUser.CloseContextMenu(null!);
 		}
 		Msg("Posting to Misskey...");
-		progress?.Report(new CompressionProgress(1.0, "Gathering metadata"));
+		progress?.Report(new CompressionProgress(0.0, "Gathering metadata..."));
 
 		Uri? url = null;
 		bool isVideo = false;
@@ -860,11 +803,15 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 		if (url is null) return (null, null);
 
-		(string worldName, string worldOwner, Uri? worldUri) = await Util.GetWorldDetailsFromMetadataAsync(metadata);
+		(string worldName, string worldOwner, Uri? worldUri) = await GetWorldDetailsFromMetadataAsync(metadata, ct);
 		string? worldUrl = worldUri?.OriginalString;
 
-		string altText = await AltTextFromMetadata(metadata);
-		string postBodyText = await FormatPostBody(Config!.GetValue(MisskeyPostBody) ?? "", metadata, worldName, worldOwner, worldUrl);
+		string altText = await AltTextFromMetadata(metadata, progress, ct);
+		string postBodyText = await FormatPostBody(Config!.GetValue(MisskeyPostBody) ?? "", metadata, worldName, worldOwner, worldUrl, ct);
+
+		if (ct.IsCancellationRequested) {
+			return (null, null);
+		}
 
 		await new ToBackground();
 
@@ -1048,60 +995,43 @@ public partial class RSEPostExtensions : ResoniteMod {
 			metadata.LocalUser.CloseContextMenu(null!);
 		}
 		Msg("Posting to GalleVR...");
-		progress?.Report(new CompressionProgress(1.0, "Gathering metadata"));
+		progress?.Report(new CompressionProgress(0.0, "Gathering metadata..."));
 
 		var tex = metadata.Slot.GetComponent<StaticTexture2D>();
 		var url = tex?.URL.Value;
 		if (url is null) return null;
 
+		Texture2D? asset = tex?.Asset;
+		float aspectRatio = (asset != null && asset.Size.y > 0)
+			? asset.Size.x / (float)asset.Size.y
+			: 16f / 9f;
+
 		List<GalleVRClient.Player> galleVRPlayers = [];
 		Slot? extendedTagSlot = metadata.Slot.FindChild("PhotoMetadata_Tags");
 		DynamicVariableSpace? extendedTagSpace = extendedTagSlot?.FindSpace("CameraMediaMetadataBase");
 
-		foreach (AssetMetadata.UserInfo userInfo in metadata.UserInfos) {
-			string? uid = userInfo.User._userId.Value;
-			if (uid is null) continue;
+		List<AssetMetadata.UserInfo> validUserInfos = [.. metadata.UserInfos.Where(u => u.User._userId.Value != null)];
 
-			bool isInView = false;
-			float headScale = 1.0f;
+		int total = validUserInfos.Count;
+		int completed = 0;
 
-			if (extendedTagSlot != null && extendedTagSpace != null) {
-				bool viewTagFound = extendedTagSpace.TryReadValue<bool>($"{uid}.isInView", out isInView);
-				if (!viewTagFound) {
-					// user might be using older version of FixPhotoMetadata... (https://github.com/BlueberryWolf/FixPhotoMetadata/issues/1)
-					// work around by scanning components directly instead :')
-					Slot? userTagSlot = extendedTagSlot.FindChild(uid);
+		foreach (AssetMetadata.UserInfo userInfo in validUserInfos) {
+			string uid = userInfo.User._userId.Value!;
 
-					if (userTagSlot != null) {
-						DynamicValueVariable<bool>? isInViewComponent = userTagSlot.GetComponents<DynamicValueVariable<bool>>().FirstOrDefault(v => v.VariableName.Value.Contains("isInView"));
-						if (isInViewComponent != null) {
-							isInView = isInViewComponent.Value.Value;
-						}
-					}
-				}
-
-				bool scaleTagFound = extendedTagSpace.TryReadValue<float>($"{uid}.headScale", out headScale);
-				if (!scaleTagFound) {
-					// user might be using older version of FixPhotoMetadata... (https://github.com/BlueberryWolf/FixPhotoMetadata/issues/1)
-					// work around by scanning components directly instead :')
-					Slot? userTagSlot = extendedTagSlot.FindChild(uid);
-
-					if (userTagSlot != null) {
-						DynamicValueVariable<float>? headScaleComponent = userTagSlot.GetComponents<DynamicValueVariable<float>>().FirstOrDefault(v => v.VariableName.Value.Contains("headScale"));
-						if (headScaleComponent != null) {
-							headScale = headScaleComponent.Value.Value;
-						}
-					}
-				}
-			}
+			(bool isInView, float headScale) = IsUserInView(metadata, userInfo, aspectRatio, extendedTagSlot, extendedTagSpace);
 
 			galleVRPlayers.Add(new GalleVRClient.Player {
 				Id = uid,
-				Name = await Util.GetUsernameFromUserId(uid, metadata.World),
+				Name = await GetUsernameFromUserId(uid, metadata.World, ct),
 				HeadPosition = GalleVRClient.Player.PackPosition(userInfo.HeadPosition.Value, headScale, isInView),
 				HeadOrientation = GalleVRClient.Player.PackOrientation(userInfo.HeadOrientation.Value)
 			});
+
+			completed++;
+			progress?.Report(new CompressionProgress((float)completed / total, $"Gathering metadata..."));
 		}
+
+		progress?.Report(new CompressionProgress(1.0f, $"Gathering metadata..."));
 
 		await new ToBackground();
 
@@ -1306,7 +1236,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Bluesky Login Failed!", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 5f, floatUpDistance: NOTIF_FLOATUP);
 			return (null, null);
 		}
-		progress?.Report(new CompressionProgress(1.0, "Gathering metadata"));
+		progress?.Report(new CompressionProgress(0.0, "Gathering metadata..."));
 
 		Uri? url = null;
 		bool isVideo = false;
@@ -1332,12 +1262,16 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 		await new ToBackground();
 
-		string altText = await AltTextFromMetadata(metadata);
+		string altText = await AltTextFromMetadata(metadata, progress, ct);
 
-		(string worldName, string worldOwner, Uri? worldUri) = await Util.GetWorldDetailsFromMetadataAsync(metadata);
+		(string worldName, string worldOwner, Uri? worldUri) = await GetWorldDetailsFromMetadataAsync(metadata, ct);
 		string? worldUrl = worldUri?.OriginalString;
 
-		string postBodyText = await FormatPostBody(Config!.GetValue(BlueskyPostBody) ?? "", metadata, worldName, worldOwner, worldUrl);
+		string postBodyText = await FormatPostBody(Config!.GetValue(BlueskyPostBody) ?? "", metadata, worldName, worldOwner, worldUrl, ct);
+
+		if (ct.IsCancellationRequested) {
+			return (null, null);
+		}
 
 		int charCount = new System.Globalization.StringInfo(postBodyText).LengthInTextElements;
 
@@ -1429,7 +1363,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 			string escapedAltText = Newtonsoft.Json.JsonConvert.ToString(altText);
 
 			using (var fileStream = File.OpenRead(srcPath)) {
-				(string mimeType, string extension) = Util.GuessImageMimeType(fileStream);
+				(string mimeType, string extension) = GuessImageMimeType(fileStream);
 				string fileName = $"image{extension}";
 
 				string fieldsJson = string.Join(", ", fields.Select(f => f.ToJson()));
@@ -1497,7 +1431,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 						string? tmpPath = await videoMetadata.Engine.AssetManager.GatherAssetFile(url, 100f);
 						if (tmpPath is null) break;
 
-						string altText = await AltTextFromMetadata(videoMetadata);
+						string altText = await AltTextFromMetadata(videoMetadata, progress);
 
 						Msg("Posting to webhook as video");
 						return await DiscordClient.PostVideoToDiscord(videoMetadata, tmpPath, altText, webhookUri, serviceInfo, progress).ContinueWith(Uri? (t) => {

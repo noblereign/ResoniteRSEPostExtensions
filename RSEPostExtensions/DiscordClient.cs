@@ -1,11 +1,12 @@
-﻿using System.Collections.Concurrent;
+﻿using System;
+using System.Collections.Concurrent;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
-using Newtonsoft.Json;
 
 using Elements.Core;
 using FrooxEngine;
+using Newtonsoft.Json;
 using ResoniteModLoader;
 
 using static ResoniteScreenshotExtensions.DiscordWebhookClient;
@@ -69,8 +70,8 @@ public class DiscordClient {
 		return new Uri($"{webhookUrl.GetLeftPart(UriPartial.Authority)}/channels/{guildSegment}/{channelId}/{messageId}");
 	}
 
-	public static async Task<Uri?> PostVideoToDiscord(VideoMetadata metadata, string filePath, string altText, Uri webhookUrl, WebhookInfo serviceInfo, IProgress<CompressionProgress>? progress = null) {
-		progress?.Report(new CompressionProgress(1.0, "Gathering metadata"));
+	public static async Task<Uri?> PostVideoToDiscord(VideoMetadata metadata, string filePath, string altText, Uri webhookUrl, WebhookInfo serviceInfo, IProgress<CompressionProgress>? progress = null, CancellationToken ct = default) {
+		progress?.Report(new CompressionProgress(0.0, "Gathering metadata..."));
 		ModConfiguration? RSEConfig = ModLoader.Mods().FirstOrDefault(m => m.Name == "ResoniteScreenshotExtensions")?.GetConfiguration();
 		if (RSEConfig == null) return null;
 		ModConfigurationKey? DiscordWebhookEmbedLocationNameKey = RSEConfig?.ConfigurationItemDefinitions.FirstOrDefault(m => m.Name == "DiscordWebhookEmbedLocationName");
@@ -91,9 +92,21 @@ public class DiscordClient {
 		var unixTimestamp = (int)metadata.TimeTaken.Value.ToUniversalTime().Subtract(new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
 		fields.Add(new EmbedField("TimeTaken", $"<t:{unixTimestamp}>"));
 		if ((bool)RSEConfig!.GetValue(DiscordWebhookEmbedUsersKey)) {
-			IEnumerable<Task<string>> userTasks = metadata.UserInfos.Select(async u =>
-				RSE.PhotoMetadata_Patch.SanitizeText(await Util.GetUsernameFromUserId(u.User._userId, metadata.World))
-			);
+			List<AssetMetadata.UserInfo> validUserInfos = [.. metadata.UserInfos.Where(u => u.User._userId.Value != null)];
+
+			int total = validUserInfos.Count;
+			int completed = 0;
+
+			IEnumerable<Task<string>> userTasks = validUserInfos.Select(async u => {
+				string rawName = await Util.GetUsernameFromUserId(u.User._userId, metadata.World, ct);
+				string sanitized = RSE.PhotoMetadata_Patch.SanitizeText(rawName);
+
+				int current = Interlocked.Increment(ref completed);
+				float currentProgress = (float)current / total;
+				progress?.Report(new CompressionProgress(currentProgress, "Gathering metadata..."));
+
+				return sanitized;
+			});
 
 			string[] usernames = await Task.WhenAll(userTasks);
 
@@ -105,7 +118,7 @@ public class DiscordClient {
 		string escapedAltText = JsonConvert.ToString(altText);
 		string fieldsJson = string.Join(", ", fields.Select(f => f.ToJson()));
 
-		(string compressedVideoPath, bool autoDelete, (int, int) resolution) = await Util.CompressVideoAsync(filePath, serviceInfo.MaxSizeMiB - 1f, 96, true, progress);
+		(string compressedVideoPath, bool autoDelete, (int, int) resolution) = await Util.CompressVideoAsync(filePath, serviceInfo.MaxSizeMiB - 1f, 96, true, progress, ct);
 
 		progress?.Report(new CompressionProgress(1.0, "Reading compressed file..."));
 
