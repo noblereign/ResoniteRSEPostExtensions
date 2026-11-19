@@ -82,8 +82,6 @@ public partial class RSEPostExtensions : ResoniteMod {
 	static readonly Uri WEBHOOK_URI = new("resdb:///9a8ef06b235f8596ba7a9b2538ac0181f2bf152964c77cff13136407f771b613.png");
 	static readonly Uri ERROR_URI = new("resdb:///92a0b1cf9536b1e675e3e1c4db52133c5dc0596d128d7bb91582ce75bfb6a9da");
 
-	private static readonly Version MIN_RESONITE_VERSION = new(2026, 6, 18, 616);
-
 	public static readonly float NOTIF_DISTANCE = 0.5f;
 	public static readonly float NOTIF_FLOATUP = 0.1f;
 
@@ -417,14 +415,6 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 		return template;
 	}
-	private static bool VersionValid(string? appVersion) {
-		if (string.IsNullOrWhiteSpace(appVersion)) return false;
-
-		int plusIndex = appVersion.IndexOf('+');
-		string cleanVersion = plusIndex >= 0 ? appVersion[..plusIndex] : appVersion;
-
-		return System.Version.TryParse(cleanVersion, out Version? parsed) && parsed >= MIN_RESONITE_VERSION;
-	}
 	private static async Task<string> AltTextFromMetadata(CameraMediaMetadataBase metadata, IProgress<CompressionProgress>? progress = null, CancellationToken ct = default) {
 		Slot? extendedTagSlot = metadata.Slot.FindChild("PhotoMetadata_Tags");
 		List<AssetMetadata.UserInfo> validUserInfos = [.. metadata.UserInfos.Where(u => u.User._userId.Value != null)];
@@ -463,9 +453,9 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 		string altText = $"{article} {lensType}{standardType} from Resonite, taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName)}.";
 
-		bool transformValid = metadata.TakenGlobalPosition.Value != float3.Zero || metadata.TakenGlobalRotation.Value != floatQ.Identity;
+		bool transformValid = TryResolveCameraTransform(photometa, extendedTagSlot, out float3 cameraPos, out floatQ cameraRot);
 
-		if (photometa != null && transformValid && (VersionValid(metadata.AppVersion.Value) || extendedTagSlot != null)) { // only do advanced alt text for photos 
+		if (photometa != null && transformValid && (IsPatchedVersion(metadata.AppVersion.Value) || extendedTagSlot != null)) { // only do advanced alt text for photos 
 			DynamicVariableSpace? extendedTagSpace = extendedTagSlot?.FindSpace("PhotoMetadata");
 
 			List<(string uid, string username, float screenX, float distance)> usersData = [];
@@ -478,8 +468,8 @@ public partial class RSEPostExtensions : ResoniteMod {
 				string uid = userInfo.User._userId.Value;
 
 				float3 userPos = userInfo.HeadPosition;
-				float3 toUser = userPos - metadata.TakenGlobalPosition.Value;
-				floatQ inverseCamRot = metadata.TakenGlobalRotation.Value.Inverted;
+				float3 toUser = userPos - cameraPos;
+				floatQ inverseCamRot = cameraRot.Inverted;
 				float3 localPos = inverseCamRot * toUser;
 
 				float distance = is360 ? localPos.Magnitude : localPos.z;
@@ -1055,6 +1045,8 @@ public partial class RSEPostExtensions : ResoniteMod {
 				return null;
 			}
 
+			bool transformValid = TryResolveCameraTransform(metadata, extendedTagSlot, out float3 cameraPos, out floatQ cameraRot);
+
 			GalleVRClient.GalleVRPhotoMetadata formattedMetadata = new() {
 				TakenById = metadata.TakenBy._userId.Value,
 				TakenDate = new DateTimeOffset(metadata.TimeTaken.Value).ToUnixTimeMilliseconds(),
@@ -1064,8 +1056,8 @@ public partial class RSEPostExtensions : ResoniteMod {
 				Application = "Resonite",
 				IsNonVrcx = false,
 				CameraFov = metadata.CameraFOV.Value,
-				TakenGlobalPosition = GalleVRClient.SpatialData.FromFloat3(metadata.TakenGlobalPosition.Value),
-				TakenGlobalRotation = GalleVRClient.SpatialData.FromFloatQ(metadata.TakenGlobalRotation.Value),
+				TakenGlobalPosition = GalleVRClient.SpatialData.FromFloat3(cameraPos),
+				TakenGlobalRotation = GalleVRClient.SpatialData.FromFloatQ(cameraRot),
 				TakenGlobalScale = GalleVRClient.SpatialData.FromFloat3(metadata.TakenGlobalScale.Value),
 				World = new GalleVRClient.WorldMetadata() {
 					Id = metadata.LocationURL.Value?.OriginalString,

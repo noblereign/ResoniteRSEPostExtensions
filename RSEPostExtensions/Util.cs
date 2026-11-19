@@ -720,6 +720,55 @@ public static class Util {
 		);
 	}
 
+	private static readonly Version MIN_RESONITE_VERSION = new(2026, 6, 18, 616);
+	public static bool IsPatchedVersion(string? appVersion) { // https://github.com/Yellow-Dog-Man/Resonite-Issues/issues/6728
+		if (string.IsNullOrWhiteSpace(appVersion)) return false;
+
+		int plusIndex = appVersion.IndexOf('+');
+		string cleanVersion = plusIndex >= 0 ? appVersion[..plusIndex] : appVersion;
+
+		return Version.TryParse(cleanVersion, out Version? parsed) && parsed >= MIN_RESONITE_VERSION;
+	}
+
+	public static bool TryResolveCameraTransform(PhotoMetadata? metadata, Slot? extendedTagSlot, out float3 camPos, out floatQ camRot) {
+		if (metadata == null) {
+			camPos = float3.Zero;
+			camRot = floatQ.Identity;
+			return false;
+		}
+		camPos = metadata.TakenGlobalPosition.Value;
+		camRot = metadata.TakenGlobalRotation.Value;
+
+		if (camPos == float3.Zero && camRot == floatQ.Identity) {
+			return false;
+		}
+
+		if (extendedTagSlot == null && metadata.CameraModel.Value == "MediaCaptureManager") {
+			string? takerUid = metadata.TakenBy._userId.Value;
+			string? takerMid = metadata.TakenBy._machineId.Value;
+
+			AssetMetadata.UserInfo? taker = metadata.UserInfos.FirstOrDefault(u =>
+				!IsLikelyHeadless(metadata, u) && (
+				(!string.IsNullOrEmpty(takerUid) && u.User._userId.Value == takerUid) ||
+				(!string.IsNullOrEmpty(takerMid) && u.User._machineId.Value == takerMid)));
+
+			if (taker != null && !taker.IsInVR.Value) {
+				float3 headPos = taker.HeadPosition.Value;
+				floatQ headRot = taker.HeadOrientation.Value;
+
+				if (headPos != float3.Zero || headRot != floatQ.Identity) {
+					camPos = headPos; // desktop has a bug where finger photos get placed at user root or something???
+					camRot = headRot; // when this happens, place the camera on the head... won't work for freecam, but better than nothing...
+					return true;
+				}
+
+				return false;
+			}
+		}
+
+		return true;
+	}
+
 	private sealed class PhotoViewCache {
 		public readonly bool TransformValid;
 		public readonly bool Is360;
@@ -735,8 +784,7 @@ public static class Util {
 		public readonly ConcurrentDictionary<string, (bool isInView, float headScale)> UserResults = new();
 
 		public PhotoViewCache(PhotoMetadata metadata, float aspectRatio, Slot? extendedTagSlot, DynamicVariableSpace? extendedTagSpace) {
-			TransformValid = metadata.TakenGlobalPosition.Value != float3.Zero
-				|| metadata.TakenGlobalRotation.Value != floatQ.Identity;
+			TransformValid = TryResolveCameraTransform(metadata, extendedTagSlot, out float3 cameraPos, out floatQ cameraRot);
 			Is360 = metadata.Is360.Value || metadata.CameraFOV.Value >= 179f;
 			AspectRatio = aspectRatio;
 
@@ -750,8 +798,8 @@ public static class Util {
 			CosHalfFovY = MathF.Cos(halfFovY);
 			CosHalfFovX = MathF.Cos(MathF.Atan(TanHalfFovX));
 
-			CamPos = metadata.TakenGlobalPosition.Value;
-			InverseCamRot = metadata.TakenGlobalRotation.Value.Inverted;
+			CamPos = cameraPos;
+			InverseCamRot = cameraRot.Inverted;
 
 			ExtendedTagSlot = extendedTagSlot ?? metadata.Slot.FindChild("PhotoMetadata_Tags");
 			ExtendedTagSpace = extendedTagSpace ?? ExtendedTagSlot?.FindSpace("PhotoMetadata");
@@ -759,6 +807,17 @@ public static class Util {
 	}
 
 	private static readonly ConditionalWeakTable<PhotoMetadata, PhotoViewCache> _viewCache = [];
+
+	public static bool IsLikelyHeadless(PhotoMetadata metadata, AssetMetadata.UserInfo userInfo) {
+		return (
+			userInfo.User._userId.Value == metadata.LocationHost._userId &&
+			userInfo.HeadPosition.Value == float3.Zero &&
+			userInfo.HeadOrientation.Value == floatQ.Identity &&
+			!userInfo.IsInVR.Value &&
+			!userInfo.IsPresent
+		);
+	}
+
 	public static (bool isInView, float headScale) IsUserInView(
 		PhotoMetadata metadata,
 		AssetMetadata.UserInfo userInfo,
@@ -777,17 +836,10 @@ public static class Util {
 		string uid = userInfo.User._userId.Value;
 
 		return cache.UserResults.GetOrAdd(uid, _ => {
-			bool isLikelyHeadless = (
-				uid == metadata.LocationHost._userId &&
-				userInfo.HeadPosition.Value == float3.Zero &&
-				userInfo.HeadOrientation.Value == floatQ.Identity &&
-				!userInfo.IsInVR.Value &&
-				!userInfo.IsPresent);
-
 			float3 localPos = cache.InverseCamRot * (userInfo.HeadPosition.Value - cache.CamPos);
 			float distance = cache.Is360 ? localPos.Magnitude : localPos.z;
 
-			bool isInView = !isLikelyHeadless && (distance > 0.05f);
+			bool isInView = !IsLikelyHeadless(metadata, userInfo) && (distance > 0.05f);
 			if (!isInView) {
 				return (false, 1.0f);
 			}
