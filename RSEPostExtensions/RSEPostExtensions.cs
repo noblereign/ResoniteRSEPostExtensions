@@ -22,7 +22,7 @@ using ResoniteHotReloadLib;
 namespace RSEPostExtensions;
 
 public partial class RSEPostExtensions : ResoniteMod {
-	internal const string VERSION_CONSTANT = "5.0.2"; //Changing the version here updates it in all locations needed
+	internal const string VERSION_CONSTANT = "5.1.0"; //Changing the version here updates it in all locations needed
 	public override string Name => "RSEPostExtensions";
 	public override string Author => "Noble";
 	public override string Version => VERSION_CONSTANT;
@@ -73,6 +73,9 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 	[AutoRegisterConfigKey]
 	public static readonly ModConfigurationKey<string> GalleVRToken = new("GalleVR Token", "GalleVR login token.\n\nThis can be obtained (scuffedly) by opening the Developer Tools in your browser, going to the Network tab, and looking for a request header containing 'Authorization: Bearer'. You'll only paste in the random characters that come after Bearer.", () => "");
+
+	[AutoRegisterConfigKey]
+	public static readonly ModConfigurationKey<bool> AdvancedAltForVanilla = new("Always use advanced alt text", "Tries to make detailed alt text for photos without FixPhotoMetadata's extra information embedded.\n\n<color=hero.yellow>Note: Alt text may be inaccurate without this metadata due to Resonite bugs, especially if the photo was taken in Desktop mode.", () => false);
 
 	static readonly Uri POST_TO_URI = new("resdb:///b5dc11709108e26d9e9788401111a15000813a262e2c7ebee2109c4321a92ad1");
 	static readonly Uri FEDIVERSE_URI = new("resdb:///87b9aee416b10948cab768e3ada9f5537d453f78971d6537ab4ad818e90a5daf.webp");
@@ -455,7 +458,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 		bool transformValid = TryResolveCameraTransform(photometa, extendedTagSlot, out float3 cameraPos, out floatQ cameraRot);
 
-		if (photometa != null && transformValid && (IsPatchedVersion(metadata.AppVersion.Value) || extendedTagSlot != null)) { // only do advanced alt text for photos 
+		if (photometa != null && transformValid && ((IsPatchedVersion(metadata.AppVersion.Value) && Config!.GetValue(AdvancedAltForVanilla)) || extendedTagSlot != null)) { // only do advanced alt text for photos 
 			DynamicVariableSpace? extendedTagSpace = extendedTagSlot?.FindSpace("PhotoMetadata");
 
 			List<(string uid, string username, float screenX, float distance)> usersData = [];
