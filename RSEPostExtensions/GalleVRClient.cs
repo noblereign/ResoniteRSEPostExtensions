@@ -308,13 +308,13 @@ public class GalleVRClient {
 
 		double targetMiB = Math.Max(0, tier.MaxBytes - 4096) / (1024.0 * 1024.0); // subtracting a lil just in case
 
-		using (System.IO.Stream fileStream = await Util.CompressImageAsync(
+		using (System.IO.Stream fileStream = await CompressImageAsync(
 			localFilePath,
 			targetMiB,
 			tier.MaxSize,
 			tier.MaxQuality,
 			tier.MaxPixels,
-			postProcess: (bytes, w, h) => Util.InjectXmp(bytes, photo, w, h),
+			postProcess: (bytes, w, h) => InjectXmp(bytes, photo, w, h),
 			progress: progress,
 			ct: ct
 		)) {

@@ -108,7 +108,7 @@ public class MisskeyDriveClient {
 		using var form = new MultipartFormDataContent();
 		using var fileStream = File.OpenRead(localFilePath);
 
-		(string mimeType, string ext) = isVideo ? Util.GuessVideoMimeType(fileStream) : Util.GuessImageMimeType(fileStream);
+		(string mimeType, string ext) = isVideo ? GuessVideoMimeType(fileStream) : GuessImageMimeType(fileStream);
 		fileStream.Position = 0;
 
 		var fileContent = new ProgressiveStreamContent(fileStream, (sent, total) => {

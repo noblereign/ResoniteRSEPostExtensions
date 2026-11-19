@@ -55,7 +55,7 @@ public class DiscordClient {
 				using HttpResponseMessage infoRes = await client.GetAsync(baseWebhookUrl, ct).ConfigureAwait(false);
 				if (infoRes.IsSuccessStatusCode) {
 					string infoJson = await infoRes.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-					using var infoDoc = System.Text.Json.JsonDocument.Parse(infoJson);
+					using var infoDoc = JsonDocument.Parse(infoJson);
 					if (infoDoc.RootElement.TryGetProperty("guild_id", out var webhookGuildEl)) {
 						guildId = webhookGuildEl.GetString();
 						if (!string.IsNullOrEmpty(guildId)) {
@@ -86,9 +86,9 @@ public class DiscordClient {
 			fields.Add(new EmbedField("LocationName", RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName.Value)));
 		}
 		if ((bool)RSEConfig!.GetValue(DiscordWebhookEmbedLocationHostKey)) {
-			fields.Add(new EmbedField("LocationHost", RSE.PhotoMetadata_Patch.SanitizeText(await Util.GetUsernameFromUserId(metadata.LocationHost._userId.Value, metadata.World))));
+			fields.Add(new EmbedField("LocationHost", RSE.PhotoMetadata_Patch.SanitizeText(await GetUsernameFromUserId(metadata.LocationHost._userId.Value, metadata.World, ct))));
 		}
-		fields.Add(new EmbedField("TakenBy", RSE.PhotoMetadata_Patch.SanitizeText(await Util.GetUsernameFromUserId(metadata.TakenBy._userId.Value, metadata.World))));
+		fields.Add(new EmbedField("TakenBy", RSE.PhotoMetadata_Patch.SanitizeText(await GetUsernameFromUserId(metadata.TakenBy._userId.Value, metadata.World, ct))));
 		var unixTimestamp = (int)metadata.TimeTaken.Value.ToUniversalTime().Subtract(new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
 		fields.Add(new EmbedField("TimeTaken", $"<t:{unixTimestamp}>"));
 		if ((bool)RSEConfig!.GetValue(DiscordWebhookEmbedUsersKey)) {
@@ -98,7 +98,7 @@ public class DiscordClient {
 			int completed = 0;
 
 			IEnumerable<Task<string>> userTasks = validUserInfos.Select(async u => {
-				string rawName = await Util.GetUsernameFromUserId(u.User._userId, metadata.World, ct);
+				string rawName = await GetUsernameFromUserId(u.User._userId, metadata.World, ct);
 				string sanitized = RSE.PhotoMetadata_Patch.SanitizeText(rawName);
 
 				int current = Interlocked.Increment(ref completed);
@@ -118,18 +118,18 @@ public class DiscordClient {
 		string escapedAltText = JsonConvert.ToString(altText);
 		string fieldsJson = string.Join(", ", fields.Select(f => f.ToJson()));
 
-		(string compressedVideoPath, bool autoDelete, (int, int) resolution) = await Util.CompressVideoAsync(filePath, serviceInfo.MaxSizeMiB - 1f, 96, true, progress, ct);
+		(string compressedVideoPath, bool autoDelete, (int, int) resolution) = await CompressVideoAsync(filePath, serviceInfo.MaxSizeMiB - 1f, 96, true, progress, ct);
 
 		progress?.Report(new CompressionProgress(1.0, "Reading compressed file..."));
 
 		try {
 			using (FileStream fileStream = File.OpenRead(compressedVideoPath)) {
-				(string mimeType, string extension) = Util.GuessVideoMimeType(fileStream);
+				(string mimeType, string extension) = GuessVideoMimeType(fileStream);
 				string fileName = $"video{extension}";
 
 				string json = $"{{\"embeds\": [{{\"fields\": [{fieldsJson}]}}], \"attachments\": [{{\"id\": 0, \"filename\": \"{fileName}\", \"description\": {escapedAltText}}}]}}";
 
-				return await SendVideo(fileStream, mimeType, extension, webhookUrl, json, progress);
+				return await SendVideo(fileStream, mimeType, extension, webhookUrl, json, progress, ct);
 			}
 		} finally {
 			if (autoDelete && File.Exists(compressedVideoPath)) {
