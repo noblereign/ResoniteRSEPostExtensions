@@ -172,6 +172,9 @@ public static class Util {
 	}
 
 	public static async Task<string> GetUsernameFromUserId(string userId, World? world, CancellationToken ct = default) {
+		if (string.IsNullOrEmpty(userId)) {
+			return "[No User]";
+		}
 		if (ct.IsCancellationRequested) {
 			return userId;
 		}

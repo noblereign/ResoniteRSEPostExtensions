@@ -22,7 +22,7 @@ using ResoniteHotReloadLib;
 namespace RSEPostExtensions;
 
 public partial class RSEPostExtensions : ResoniteMod {
-	internal const string VERSION_CONSTANT = "5.1.0"; //Changing the version here updates it in all locations needed
+	internal const string VERSION_CONSTANT = "5.1.1"; //Changing the version here updates it in all locations needed
 	public override string Name => "RSEPostExtensions";
 	public override string Author => "Noble";
 	public override string Version => VERSION_CONSTANT;
@@ -383,7 +383,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 		string photographerName = await GetUsernameFromUserId(metadata.TakenBy._userId, metadata.World, ct);
 		string hostName = await GetUsernameFromUserId(metadata.LocationHost._userId.Value, metadata.World, ct);
-		string locationName = Fallback(RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName));
+		string locationName = Fallback(RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName ?? "Unknown Location"));
 
 		string resolvedWorldName = !string.IsNullOrWhiteSpace(apiWorldName) ? apiWorldName : locationName;
 		string resolvedWorldOwner = !string.IsNullOrWhiteSpace(apiWorldOwner) ? apiWorldOwner : Fallback(hostName);
@@ -454,7 +454,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 		float cosHalfFovY = MathF.Cos(halfFovY);
 		float cosHalfFovX = MathF.Cos(MathF.Atan(tanHalfFovX));
 
-		string altText = $"{article} {lensType}{standardType} from Resonite, taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName)}.";
+		string altText = $"{article} {lensType}{standardType} from Resonite, taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName ?? "Unknown Location")}.";
 
 		bool transformValid = TryResolveCameraTransform(photometa, extendedTagSlot, out float3 cameraPos, out floatQ cameraRot);
 
@@ -530,7 +530,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 			int totalUsers = usersData.Count;
 			string crowdText = totalUsers >= 5 ? $". {totalUsers} users are visible in the photo" : "";
-			string baseText = $"{article} {lensType}{(isSelfie ? selfieType : standardType)} from Resonite, taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName)}{crowdText}.";
+			string baseText = $"{article} {lensType}{(isSelfie ? selfieType : standardType)} from Resonite, taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName ?? "Unknown Location")}{crowdText}.";
 
 			float depthThreshold = photometa?.CameraFOV.Value switch {
 				>= 179f => 2.0f,
@@ -1391,7 +1391,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 		if (!Config!.GetValue(Multiposting)) {
 			metadata.LocalUser.CloseContextMenu(null!);
 		}
-		Msg("Posting to Discord...");
+		Msg("Posting to webhook...");
 
 		Uri? postUrl = await metadata.StartGlobalTask(async Task<Uri?> () => {
 			switch (metadata) {

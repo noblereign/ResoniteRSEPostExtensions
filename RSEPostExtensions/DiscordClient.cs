@@ -83,7 +83,7 @@ public class DiscordClient {
 
 		var fields = new List<EmbedField>();
 		if ((bool)RSEConfig!.GetValue(DiscordWebhookEmbedLocationNameKey)) {
-			fields.Add(new EmbedField("LocationName", RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName.Value)));
+			fields.Add(new EmbedField("LocationName", RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName.Value ?? "Unknown Location")));
 		}
 		if ((bool)RSEConfig!.GetValue(DiscordWebhookEmbedLocationHostKey)) {
 			fields.Add(new EmbedField("LocationHost", RSE.PhotoMetadata_Patch.SanitizeText(await GetUsernameFromUserId(metadata.LocationHost._userId.Value, metadata.World, ct))));
