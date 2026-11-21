@@ -206,9 +206,9 @@ public class DiscordClient {
 		Uri baseUri = new(webhookUrl);
 		var request = new HttpRequestMessage(HttpMethod.Post, AppendWaitQuery(baseUri));
 		var form = new MultipartFormDataContent {
-		{ fileContent, "files[0]" },
-		{ new System.Net.Http.StringContent(payloadJson), "payload_json" }
-	};
+			{ fileContent, "files[0]" },
+			{ new StringContent(payloadJson), "payload_json" }
+		};
 		request.Content = form;
 
 		using var response = await client.SendAsync(request, ct).ConfigureAwait(false);

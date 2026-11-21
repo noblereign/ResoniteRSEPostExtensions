@@ -173,7 +173,7 @@ public static class Util {
 
 	public static async Task<string> GetUsernameFromUserId(string userId, World? world, CancellationToken ct = default) {
 		if (string.IsNullOrEmpty(userId)) {
-			return "[No User]";
+			return "(???)";
 		}
 		if (ct.IsCancellationRequested) {
 			return userId;
@@ -263,7 +263,7 @@ public static class Util {
 				worldOwner = apiResult.Value.OwnerName;
 			} else {
 				worldName = metadata.LocationName?.Value ?? "Unknown Location";
-				worldOwner = (metadata.LocationHost?._userId != null) ? await GetUsernameFromUserId(metadata.LocationHost._userId, metadata.World, ct) : "Unknown Creator";
+				worldOwner = (metadata.LocationHost?._userId != null) ? await GetUsernameFromUserId(metadata.LocationHost._userId.Value, metadata.World, ct) : "Unknown Creator";
 				worldUrl = null;
 			}
 		}
@@ -813,7 +813,7 @@ public static class Util {
 
 	public static bool IsLikelyHeadless(PhotoMetadata metadata, AssetMetadata.UserInfo userInfo) {
 		return (
-			userInfo.User._userId.Value == metadata.LocationHost._userId &&
+			userInfo.User._userId.Value == metadata.LocationHost._userId.Value &&
 			userInfo.HeadPosition.Value == float3.Zero &&
 			userInfo.HeadOrientation.Value == floatQ.Identity &&
 			!userInfo.IsInVR.Value &&

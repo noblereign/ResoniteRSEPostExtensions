@@ -381,9 +381,9 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 		static string Fallback(string? val) => string.IsNullOrWhiteSpace(val) ? "Unknown" : val;
 
-		string photographerName = await GetUsernameFromUserId(metadata.TakenBy._userId, metadata.World, ct);
+		string photographerName = await GetUsernameFromUserId(metadata.TakenBy._userId.Value, metadata.World, ct);
 		string hostName = await GetUsernameFromUserId(metadata.LocationHost._userId.Value, metadata.World, ct);
-		string locationName = Fallback(RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName ?? "Unknown Location"));
+		string locationName = Fallback(RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName.Value ?? "Unknown Location"));
 
 		string resolvedWorldName = !string.IsNullOrWhiteSpace(apiWorldName) ? apiWorldName : locationName;
 		string resolvedWorldOwner = !string.IsNullOrWhiteSpace(apiWorldOwner) ? apiWorldOwner : Fallback(hostName);
@@ -425,7 +425,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 		int userIdCount = 1 + (validUserInfos.Count);
 		int userIdsChecked = 0;
 
-		string photographerName = await GetUsernameFromUserId(metadata.TakenBy._userId, metadata.World, ct);
+		string photographerName = await GetUsernameFromUserId(metadata.TakenBy._userId.Value, metadata.World, ct);
 		userIdsChecked++;
 		progress?.Report(new CompressionProgress(MathX.Clamp01((float)userIdsChecked / (float)userIdCount), "Gathering metadata..."));
 
@@ -454,7 +454,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 		float cosHalfFovY = MathF.Cos(halfFovY);
 		float cosHalfFovX = MathF.Cos(MathF.Atan(tanHalfFovX));
 
-		string altText = $"{article} {lensType}{standardType} from Resonite, taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName ?? "Unknown Location")}.";
+		string altText = $"{article} {lensType}{standardType} from Resonite, taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName.Value ?? "Unknown Location")}.";
 
 		bool transformValid = TryResolveCameraTransform(photometa, extendedTagSlot, out float3 cameraPos, out floatQ cameraRot);
 
@@ -520,7 +520,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 			}
 
 			// if it's a solo selfie then don't bother mentioning where they are
-			if (usersData.Count == 1 && usersData[0].uid == metadata.TakenBy._userId) {
+			if (usersData.Count == 1 && usersData[0].uid == metadata.TakenBy._userId.Value) {
 				usersData.Clear();
 			}
 
@@ -530,7 +530,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 			int totalUsers = usersData.Count;
 			string crowdText = totalUsers >= 5 ? $". {totalUsers} users are visible in the photo" : "";
-			string baseText = $"{article} {lensType}{(isSelfie ? selfieType : standardType)} from Resonite, taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName ?? "Unknown Location")}{crowdText}.";
+			string baseText = $"{article} {lensType}{(isSelfie ? selfieType : standardType)} from Resonite, taken by {photographerName} in {RSE.PhotoMetadata_Patch.SanitizeText(metadata.LocationName.Value ?? "Unknown Location")}{crowdText}.";
 
 			float depthThreshold = photometa?.CameraFOV.Value switch {
 				>= 179f => 2.0f,
@@ -1378,8 +1378,8 @@ public partial class RSEPostExtensions : ResoniteMod {
 				return messageUrl != null;
 			}
 		} catch (Exception ex) {
-			RSEPostExtensions.Warn($"Error occurred whilst posting image to Discord!! {ex}");
-			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Error posting image to Discord, check log!!", colorX.Red, NOTIF_DISTANCE, 5f, floatUpDistance: NOTIF_FLOATUP);
+			RSEPostExtensions.Warn($"Error occurred whilst posting image to webhook!! {ex}");
+			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Error posting image to webhook, check log!!", colorX.Red, NOTIF_DISTANCE, 5f, floatUpDistance: NOTIF_FLOATUP);
 			context.CompletionSource.TrySetResult(null);
 			return false;
 		} finally {
@@ -1420,6 +1420,9 @@ public partial class RSEPostExtensions : ResoniteMod {
 							}
 
 							return await tcs.Task;
+						} catch (Exception ex) {
+							Warn($"Caught error while posting to webhook! {ex}");
+							return null;
 						} finally {
 							_urlMappings.TryRemove(tmpPath, out _);
 						}
