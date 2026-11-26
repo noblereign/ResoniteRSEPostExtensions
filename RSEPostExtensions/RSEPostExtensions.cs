@@ -22,7 +22,7 @@ using ResoniteHotReloadLib;
 namespace RSEPostExtensions;
 
 public partial class RSEPostExtensions : ResoniteMod {
-	internal const string VERSION_CONSTANT = "5.1.1"; //Changing the version here updates it in all locations needed
+	internal const string VERSION_CONSTANT = "5.2.0"; //Changing the version here updates it in all locations needed
 	public override string Name => "RSEPostExtensions";
 	public override string Author => "Noble";
 	public override string Version => VERSION_CONSTANT;
