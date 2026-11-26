@@ -842,9 +842,6 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 		} catch (Exception ex) {
 			Warn($"Misskey upload failed: {ex.Message}");
-
-			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to Misskey!", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 5f, floatUpDistance: NOTIF_FLOATUP);
-
 			return (null, null);
 		}
 	}
@@ -1076,9 +1073,6 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 		} catch (Exception ex) {
 			Warn($"GalleVR upload failed: {ex.Message}");
-
-			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to GalleVR!", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 5f, floatUpDistance: NOTIF_FLOATUP);
-
 			return null;
 		}
 	}
@@ -1230,14 +1224,14 @@ public partial class RSEPostExtensions : ResoniteMod {
 
 		try {
 			if (string.IsNullOrWhiteSpace(handle) || string.IsNullOrWhiteSpace(password)) {
-				NotificationMessage.SpawnTextMessage("[RSEPostExtensions] No app password specified!", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 5f, floatUpDistance: NOTIF_FLOATUP);
+				NotificationMessage.SpawnTextMessage("No app password specified!", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 5f, floatUpDistance: NOTIF_FLOATUP / 2f);
 				return (null, null);
 			}
 			progress?.Report(new CompressionProgress(1.0, "Authenticating"));
 			await bskyManager.LoginAsync(handle, password);
 		} catch (Exception ex) {
 			Warn($"Failed to login to Bluesky: {ex.Message}");
-			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Bluesky Login Failed!", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 5f, floatUpDistance: NOTIF_FLOATUP);
+			NotificationMessage.SpawnTextMessage("Bluesky Login Failed!", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 5f, floatUpDistance: NOTIF_FLOATUP / 2f);
 			return (null, null);
 		}
 		progress?.Report(new CompressionProgress(0.0, "Gathering metadata..."));
@@ -1379,7 +1373,6 @@ public partial class RSEPostExtensions : ResoniteMod {
 			}
 		} catch (Exception ex) {
 			RSEPostExtensions.Warn($"Error occurred whilst posting image to webhook!! {ex}");
-			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Error posting image to webhook, check log!!", colorX.Red, NOTIF_DISTANCE, 5f, floatUpDistance: NOTIF_FLOATUP);
 			context.CompletionSource.TrySetResult(null);
 			return false;
 		} finally {
@@ -1444,12 +1437,10 @@ public partial class RSEPostExtensions : ResoniteMod {
 						return await DiscordClient.PostVideoToDiscord(videoMetadata, tmpPath, altText, webhookUri, serviceInfo, progress).ContinueWith(Uri? (t) => {
 							if (t.IsFaulted) {
 								Warn($"Error occurred whilst posting video to webhook!! {t.Exception}");
-								NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Error posting video to webhook, check log!!", colorX.Red, NOTIF_DISTANCE, 5f);
 								return null;
 							}
 							if (t.Result == null) {
 								Warn("Failed to post video to webhook");
-								NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post video to webhook, check log", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 5f);
 								return null;
 							}
 							return t.Result;
@@ -1457,7 +1448,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 					}
 				default:
 					Msg("Posting to webhook as.. um.. what kind of file is this");
-					NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Media type currently unsupported :(", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 5f);
+					NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Media type currently unsupported :(", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 5f, floatUpDistance: NOTIF_FLOATUP / 2f);
 					return null;
 			}
 			return null;
@@ -1490,7 +1481,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 					return context.WebhookUri.ToString();
 				}
 				Warn("Couldn't find webhook URI mapping!! ABORT!!!");
-				NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to Discord, please try again!", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 5f);
+				NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post to Discord, please try again!", RadiantUI_Constants.Hero.RED, NOTIF_DISTANCE, 5f, floatUpDistance: NOTIF_FLOATUP / 2f);
 				return "";
 			}
 			return configInstance.GetValue(key);

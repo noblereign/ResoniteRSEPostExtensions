@@ -216,7 +216,6 @@ public class DiscordClient {
 
 		if (!response.IsSuccessStatusCode) {
 			RSEPostExtensions.Warn($"Failed to post image with webhook: {response.StatusCode} {responseBody}");
-			NotificationMessage.SpawnTextMessage("[RSEPostExtensions] Failed to post image with webhook, check log", RadiantUI_Constants.Hero.RED, RSEPostExtensions.NOTIF_DISTANCE, 5f, floatUpDistance: RSEPostExtensions.NOTIF_FLOATUP);
 			return null;
 		}
 
