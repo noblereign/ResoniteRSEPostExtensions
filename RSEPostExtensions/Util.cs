@@ -41,6 +41,10 @@ public static class EncoderChoiceExtension {
 
 public static class Util {
 	private static readonly HttpClient _http = new();
+	static Util() {
+		EnsureUserAgent(_http);
+	}
+
 	private static readonly string[] Adjectives = [
 		"Swift", "Clever", "Brave", "Bright", "Calm", "Eager", "Kind", "Lively",
 		"Silly", "Wild", "Gentle", "Fancy", "Proud", "Jolly", "Vast", "Sharp",
@@ -80,8 +84,6 @@ public static class Util {
 		byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(str));
 		return BitConverter.ToInt32(hashBytes, 0);
 	}
-
-	private static readonly HttpClient _httpClient = new();
 	private static readonly ConcurrentDictionary<string, WebManifest> _manifestCache = new();
 	public static async Task<WebManifest?> GetManifestAsync(string baseUrl) {
 		string url = $"{baseUrl.TrimEnd('/')}/manifest.json";
@@ -90,7 +92,7 @@ public static class Util {
 			return cachedManifest;
 		}
 
-		string jsonString = await _httpClient.GetStringAsync(url);
+		string jsonString = await _http.GetStringAsync(url);
 
 		var manifest = JsonSerializer.Deserialize<WebManifest>(jsonString);
 
@@ -901,5 +903,28 @@ public static class Util {
 
 			return (isInView, headScale);
 		});
+	}
+
+	public static void EnsureUserAgent(HttpClient client) {
+		ArgumentNullException.ThrowIfNull(client);
+
+		if (client.DefaultRequestHeaders.UserAgent.Count > 0)
+			return;
+
+		static string FormatVersion(Version? v) => v is null
+			? "unknown"
+			: v.Build >= 0 ? v.ToString(3) : v.ToString(2);
+
+		string rsepeVersion = FormatVersion(typeof(Util).Assembly.GetName().Version);
+		string rseVersion = FormatVersion(typeof(RSE).Assembly.GetName().Version);
+
+		string engineVersion = string.IsNullOrWhiteSpace(Engine.CurrentVersion)
+			? "unknown"
+			: Engine.CurrentVersion.Trim().Replace(' ', '-');
+
+		client.DefaultRequestHeaders.UserAgent.ParseAdd(
+			$"RSEPostExtensions/{rsepeVersion} ResoniteScreenshotExtensions/{rseVersion} Resonite/{engineVersion} (+https://github.com/noblereign/ResoniteRSEPostExtensions)"
+		);
+		RSEPostExtensions.Msg($"Set user agent: {client.DefaultRequestHeaders.UserAgent}");
 	}
 }

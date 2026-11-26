@@ -14,6 +14,10 @@ namespace RSEPostExtensions;
 public class GalleVRClient {
 	private static readonly HttpClient _http = new();
 	private static readonly Uri apiUri = new("https://api.gallevr.app/");
+	static GalleVRClient() {
+		EnsureUserAgent(_http);
+	}
+
 	public record GalleVRPhotoMetadata {
 		[JsonPropertyName("takenDate")]
 		public required long TakenDate { get; init; }
@@ -339,10 +343,8 @@ public class GalleVRClient {
 			using (HttpResponseMessage response = await _http.SendAsync(request, ct)) {
 				await EnsureSuccessWithBodyAsync(response);
 				return await response.Content.ReadAsStringAsync(ct);
-			}
-			;
-		}
-		;
+			};
+		};
 	}
 
 	private static async Task EnsureSuccessWithBodyAsync(HttpResponseMessage response) {

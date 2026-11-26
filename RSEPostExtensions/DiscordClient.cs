@@ -23,6 +23,9 @@ public class DiscordClient {
 	// referenced from https://github.com/hantabaru1014/ResoniteScreenshotExtensions/blob/main/Patches/PhotoMetadataPatch.cs
 	private static readonly HttpClient _client = new();
 	private static readonly ConcurrentDictionary<string, string> _webhookGuildCache = new();
+	static DiscordClient() {
+		EnsureUserAgent(_client);
+	}
 
 	private static Uri AppendWaitQuery(Uri webhookUrl) {
 		var builder = new UriBuilder(webhookUrl);

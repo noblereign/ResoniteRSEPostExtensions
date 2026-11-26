@@ -1339,6 +1339,7 @@ public partial class RSEPostExtensions : ResoniteMod {
 	public static bool SendImageHook(object __instance, string srcPath, IEnumerable<ResoniteScreenshotExtensions.DiscordWebhookClient.EmbedField> fields, ref Task<bool> __result) {
 		string webhookUrl = Traverse.Create(__instance).Field("_webhookUrl").GetValue<string>();
 		HttpClient client = Traverse.Create(__instance).Field("_client").GetValue<HttpClient>();
+		EnsureUserAgent(client);
 
 		if (_urlMappings.TryGetValue(srcPath, out DiscordPostContext? context)) {
 			__result = InjectAltText(context, srcPath, fields, webhookUrl, client);

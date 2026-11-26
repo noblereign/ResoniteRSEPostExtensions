@@ -9,6 +9,9 @@ namespace RSEPostExtensions;
 
 public class MisskeyDriveClient {
 	private static readonly HttpClient _http = new();
+	static MisskeyDriveClient() {
+		EnsureUserAgent(_http);
+	}
 
 	public record DriveFolder(
 		[property: JsonPropertyName("id")] string Id,

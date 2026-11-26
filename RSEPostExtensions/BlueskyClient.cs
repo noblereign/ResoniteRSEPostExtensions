@@ -12,6 +12,9 @@ using static RSEPostExtensions.Util;
 namespace RSEPostExtensions;
 public partial class BlueskyClient {
 	private static readonly HttpClient _http = new();
+	static BlueskyClient() {
+		EnsureUserAgent(_http);
+	}
 
 	public record SessionRequest(
 		[property: JsonPropertyName("identifier")] string Identifier,
